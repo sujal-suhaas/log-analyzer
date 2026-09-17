@@ -25,6 +25,12 @@ export function LogFilters({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const generation = useRef(0);
+  // Hold the latest callback in a ref: parent re-renders must not restart the debounce
+  // (an inline onChange prop changes identity every render and would re-query forever).
+  const onChangeRef = useRef(onChange);
+  useEffect(() => {
+    onChangeRef.current = onChange;
+  }, [onChange]);
   useEffect(() => {
     if (disabled) return;
     const id = ++generation.current;
@@ -34,12 +40,12 @@ export function LogFilters({
         setError("");
         if (!filterWhere(draft).active) {
           setBusy(false);
-          onChange(null);
+          onChangeRef.current(null);
           return;
         }
         setBusy(true);
         const result = await client.filter(revision, draft);
-        if (active && generation.current === id) onChange(result);
+        if (active && generation.current === id) onChangeRef.current(result);
       } catch (cause) {
         if (active && generation.current === id)
           setError(cause instanceof Error ? cause.message : "Filter failed.");
@@ -51,7 +57,7 @@ export function LogFilters({
       active = false;
       clearTimeout(timer);
     };
-  }, [client, revision, disabled, draft, onChange]);
+  }, [client, revision, disabled, draft]);
   const field = (key: keyof Filters, value: string | boolean) =>
     setDraft((current) => ({ ...current, [key]: value }));
   const inputClass = "min-w-0 rounded border bg-background px-2 py-1.5 text-xs";
@@ -88,7 +94,7 @@ export function LogFilters({
             setDraft({ ...EMPTY_FILTERS });
             setBusy(false);
             setError("");
-            onChange(null);
+            onChangeRef.current(null);
           }}
         >
           Clear filters
