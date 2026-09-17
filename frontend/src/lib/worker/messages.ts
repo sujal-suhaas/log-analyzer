@@ -1,4 +1,5 @@
 import type { ParsedRecord, ParserId } from "../parsers/types";
+import type { QueryPreset, QueryResult } from "../queries";
 
 // Worker owns text, offsets and records. UI receives summaries and bounded windows.
 export type LogSummary = {
@@ -32,6 +33,7 @@ export type LogRequest =
       index: number;
       structured: boolean;
     }
+  | { id: number; type: "RUN_QUERY"; revision: number; preset: QueryPreset }
   | { id: number; type: "CANCEL"; target: number };
 export type RequestPayload = LogRequest extends infer R
   ? R extends LogRequest
@@ -42,7 +44,13 @@ export type LogResponse =
   | {
       id: number;
       ok: true;
-      result: LogSummary | string[] | RecordEntry[] | LogDetail | null;
+      result:
+        | LogSummary
+        | string[]
+        | RecordEntry[]
+        | LogDetail
+        | QueryResult
+        | null;
     }
   | { id: number; ok: false; error: string; name: string };
 export type LogEvent =

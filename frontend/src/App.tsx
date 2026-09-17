@@ -29,6 +29,7 @@ import {
 import { FileImport } from "@/components/file-import";
 import { LogTable } from "@/components/log-table";
 import { StructuredTable } from "@/components/structured-table";
+import { QueryPresets } from "@/components/query-presets";
 import { PARSERS, type ParserId } from "@/lib/parsers";
 import { displayValue } from "@/lib/parsers/types";
 import { ACCEPT, formatBytes, type ImportProgress } from "@/lib/read-log-file";
@@ -386,7 +387,7 @@ function App() {
               {copied ? "Copied" : "Copy"}
             </Button>
           </div>
-          <pre className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-3 font-mono text-xs leading-6 text-zinc-300">
+          <pre aria-label="Raw log content" className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-3 font-mono text-xs leading-6 text-zinc-300">
             {detail ? raw || "(empty line)" : "Loading…"}
           </pre>
         </div>
@@ -457,7 +458,7 @@ function App() {
                   variant="outline"
                   className="text-[9px] text-muted-foreground"
                 >
-                  PHASE 03
+                  PHASE 04
                 </Badge>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
@@ -644,6 +645,14 @@ function App() {
                 : `${formatBytes(progress.bytes)} / ${formatBytes(pending.size)}`}
             </p>
           </div>
+        )}
+        {log && (
+          <QueryPresets
+            key={log.revision}
+            client={client}
+            revision={log.revision}
+            disabled={!!pending}
+          />
         )}
         <section
           className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/30 sm:mx-7 sm:mb-6"

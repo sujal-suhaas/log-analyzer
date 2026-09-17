@@ -72,6 +72,19 @@ self.onmessage = async ({ data: request }: MessageEvent<LogRequest>) => {
     if (!current || current.revision !== request.revision)
       throw new Error("Dataset changed. Retry with current dataset.");
     const { log, dataset } = current;
+    if (request.type === "RUN_QUERY") {
+      const { runPreset } = await import("./database");
+      const result = await runPreset(
+        request.revision,
+        log,
+        dataset,
+        request.preset,
+      );
+      if (current?.revision !== request.revision)
+        throw new Error("Dataset changed. Run query again.");
+      respond({ id: request.id, ok: true, result });
+      return;
+    }
     if (request.type === "GET_DETAIL") {
       const total = request.structured
         ? dataset.records.length

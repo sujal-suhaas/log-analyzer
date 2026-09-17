@@ -16,8 +16,8 @@ test('Phase 1: health, file import, raw detail, large virtual scroll, cancel and
   await page.getByRole('button', { name: 'Raw', exact: true }).click()
   await expect(page.getByRole('listbox')).toBeVisible()
   await page.getByRole('listbox').getByRole('option').nth(1).click()
-  await expect(page.locator('pre')).toHaveText('last')
-  expect(await page.locator('pre').textContent()).toBe('last')
+  await expect(page.getByLabel('Raw log content')).toHaveText('last')
+  expect(await page.getByLabel('Raw log content').textContent()).toBe('last')
 
   // 50 MiB exactly: 200K lines; offset storage avoids a string object per row.
   const row = '2026-09-17T10:00:00Z INFO api request completed '.padEnd(261, 'x') + '\n'

@@ -88,7 +88,7 @@ test("Worker: atomic cancellation, responsive parsing, bounded windows and same-
   // New requests must read old Worker dataset, not just old UI cache.
   await page.getByRole("button", { name: "Raw", exact: true }).click();
   await page.getByRole("listbox").getByRole("option").first().click();
-  await expect(page.locator("pre")).toHaveText('{"message":"old"}');
+  await expect(page.getByLabel("Raw log content")).toHaveText('{"message":"old"}');
   await page.getByRole("button", { name: "Structured", exact: true }).click();
   await picker.setInputFiles({
     ...old,
@@ -107,7 +107,7 @@ test("Worker: atomic cancellation, responsive parsing, bounded windows and same-
   await grid.focus();
   await grid.press("End");
   await expect(grid.locator('[aria-rowindex="300001"]')).toBeVisible();
-  await expect(page.locator("pre")).toContainText('"nested":{"status":200}');
+  await expect(page.getByLabel("Raw log content")).toContainText('"nested":{"status":200}');
   const probe = await page.evaluate(() => {
     const p = (
       window as unknown as {
@@ -156,7 +156,7 @@ test("Worker: invalid UTF-8 preserves data; crash surfaced and Clear recovers", 
   await expect(page.getByRole("alert")).toContainText("valid UTF-8");
   await grid.focus();
   await grid.press("Enter");
-  await expect(page.locator("pre")).toHaveText("hello");
+  await expect(page.getByLabel("Raw log content")).toHaveText("hello");
   await page.evaluate(() => {
     const p = (window as unknown as { workerProbe: { workers: Worker[] } })
       .workerProbe;

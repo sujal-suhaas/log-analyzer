@@ -1,4 +1,5 @@
 import type { ParserId } from "../parsers/types";
+import type { QueryPreset, QueryResult } from "../queries";
 import type {
   LogDetail,
   LogEvent,
@@ -111,6 +112,10 @@ export class LogWorkerClient {
   parseFile(parser: ParserId, onProgress: (event: LogEvent) => void) {
     this.cancel();
     return this.request<LogSummary>({ type: "PARSE_FILE", parser }, onProgress);
+  }
+
+  query(revision: number, preset: QueryPreset) {
+    return this.request<QueryResult>({ type: "RUN_QUERY", revision, preset });
   }
 
   rawRows(revision: number, start: number, count: number) {
