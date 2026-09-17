@@ -1,3 +1,4 @@
+import type { Filters, FilterSummary } from "../filters";
 import type { ParserId } from "../parsers/types";
 import type { QueryPreset, QueryResult } from "../queries";
 import type {
@@ -6,6 +7,7 @@ import type {
   LogResponse,
   LogSummary,
   RecordEntry,
+  RawEntry,
   RequestPayload,
 } from "./messages";
 
@@ -118,27 +120,39 @@ export class LogWorkerClient {
     return this.request<QueryResult>({ type: "RUN_QUERY", revision, preset });
   }
 
-  rawRows(revision: number, start: number, count: number) {
-    return this.request<string[]>({
+  filter(revision: number, filters: Filters) {
+    return this.request<FilterSummary>({ type: "FILTER", revision, filters });
+  }
+
+  rawRows(revision: number, start: number, count: number, filterId?: number) {
+    return this.request<RawEntry[]>({
       type: "GET_RAW_ROWS",
+      filterId,
       revision,
       start,
       count,
     });
   }
 
-  records(revision: number, start: number, count: number) {
+  records(revision: number, start: number, count: number, filterId?: number) {
     return this.request<RecordEntry[]>({
       type: "GET_RECORDS",
+      filterId,
       revision,
       start,
       count,
     });
   }
 
-  detail(revision: number, index: number, structured: boolean) {
+  detail(
+    revision: number,
+    index: number,
+    structured: boolean,
+    filterId?: number,
+  ) {
     return this.request<LogDetail>({
       type: "GET_DETAIL",
+      filterId,
       revision,
       index,
       structured,

@@ -1,10 +1,11 @@
 import * as duckdb from "@duckdb/duckdb-wasm";
-import wasm from "@duckdb/duckdb-wasm/dist/duckdb-mvp.wasm?url";
-import workerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-mvp.worker.js?url";
+import wasm from "@duckdb/duckdb-wasm/dist/duckdb-eh.wasm?url";
+import workerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url";
 import { CORE_FIELDS, type ParsedDataset } from "../parsers/types";
 import { recordRaw } from "../parsers";
 import type { LogFile } from "../read-log-file";
 import { QUERIES, type QueryPreset, type QueryResult } from "../queries";
+import { filterWhere, type Filters, type Highlight } from "../filters";
 
 let engine: Promise<{
   db: duckdb.AsyncDuckDB;
@@ -34,15 +35,13 @@ async function open() {
 }
 
 // Load on first preset run. Keep SQL work serialized and old table until commit.
-export function runPreset(
+function withDatabase<T>(
   revision: number,
   log: LogFile,
   dataset: ParsedDataset,
-  preset: QueryPreset,
-): Promise<QueryResult> {
+  action: (connection: duckdb.AsyncDuckDBConnection) => Promise<T>,
+): Promise<T> {
   const task = queue.then(async () => {
-    if (!Object.hasOwn(QUERIES, preset))
-      throw new Error("Unknown query preset.");
     const { db, connection } = await (engine ??= open());
     if (loadedRevision !== revision) {
       await connection.query(
@@ -89,6 +88,21 @@ export function runPreset(
         throw error;
       }
     }
+    return action(connection);
+  });
+  queue = task.catch(() => {});
+  return task;
+}
+
+export function runPreset(
+  revision: number,
+  log: LogFile,
+  dataset: ParsedDataset,
+  preset: QueryPreset,
+): Promise<QueryResult> {
+  if (!Object.hasOwn(QUERIES, preset))
+    return Promise.reject(new Error("Unknown query preset."));
+  return withDatabase(revision, log, dataset, async (connection) => {
     const started = performance.now();
     const result = await connection.query(QUERIES[preset].sql);
     return {
@@ -103,6 +117,74 @@ export function runPreset(
       elapsedMs: performance.now() - started,
     };
   });
-  queue = task.catch(() => {});
-  return task;
+}
+
+export function filterLines(
+  revision: number,
+  log: LogFile,
+  dataset: ParsedDataset,
+  filters: Filters,
+) {
+  const where = filterWhere(filters);
+  return withDatabase(revision, log, dataset, async (connection) => {
+    // Validate even on empty tables: malformed RE2 patterns must surface consistently.
+    const validation = await connection.prepare(
+      `SELECT regexp_matches(?, ?, '${filters.regex ? "i" : "il"}')`,
+    );
+    try {
+      await validation.query("", filters.text);
+    } finally {
+      await validation.close();
+    }
+    const statement = await connection.prepare(
+      `SELECT source_line FROM logs WHERE ${where.sql} ORDER BY source_line`,
+    );
+    try {
+      const result = await statement.query(...where.params);
+      return Uint32Array.from(
+        result.toArray(),
+        (row) => Number(row.source_line) - 1,
+      );
+    } finally {
+      await statement.close();
+    }
+  });
+}
+
+export function highlightTexts(
+  revision: number,
+  log: LogFile,
+  dataset: ParsedDataset,
+  filters: Filters,
+  texts: string[],
+): Promise<Highlight[][]> {
+  if (!filters.text || !texts.length)
+    return Promise.resolve(texts.map(() => []));
+  return withDatabase(revision, log, dataset, async (connection) => {
+    const statement = await connection.prepare(
+      `SELECT string_split_regex(text, ?, '${filters.regex ? "i" : "il"}') AS parts, regexp_extract_all(text, ?, 0, '${filters.regex ? "i" : "il"}') AS matches FROM (VALUES ${texts.map(() => "(?)").join(",")}) AS input(text)`,
+    );
+    try {
+      // ponytail: highlights cover first 2000 chars; full raw detail stays available without markup beyond this bound.
+      const result = await statement.query(
+        filters.text,
+        filters.text,
+        ...texts.map((text) => text.slice(0, 2000)),
+      );
+      return result.toArray().map((row) => {
+        const parts = Array.from(row.parts) as string[];
+        const matches = Array.from(row.matches) as string[];
+        let offset = 0;
+        const ranges: Highlight[] = [];
+        matches.forEach((match, index) => {
+          offset += (parts[index] ?? "").length;
+          if (match.length) ranges.push([offset, offset + match.length]);
+          offset += match.length;
+        });
+        return ranges;
+      });
+    } finally {
+      await statement.close();
+    }
+  });
 }

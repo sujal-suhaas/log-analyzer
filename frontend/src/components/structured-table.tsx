@@ -1,5 +1,6 @@
 import { useCallback, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { HighlightText } from "@/components/highlight";
 import { useWindow } from "@/lib/use-window";
 import { CORE_FIELDS, displayValue } from "@/lib/parsers/types";
 import type { LogSummary } from "@/lib/worker/messages";
@@ -8,11 +9,15 @@ import type { LogWorkerClient } from "@/lib/worker/log-client";
 export function StructuredTable({
   client,
   summary,
+  filterId,
+  total,
   selected,
   onSelect,
 }: {
   client: LogWorkerClient;
   summary: LogSummary;
+  filterId?: number;
+  total: number | null;
   selected: number | null;
   onSelect: (row: number) => void;
 }) {
@@ -28,10 +33,11 @@ export function StructuredTable({
   const to = range[range.length - 1]?.index ?? -1;
   const fetcher = useCallback(
     (start: number, count: number) =>
-      client.records(summary.revision, start, count),
-    [client, summary.revision],
+      client.records(summary.revision, start, count, filterId),
+    [client, summary.revision, filterId],
   );
-  const { lookup, error } = useWindow(fetcher, summary.total, from, to);
+  const viewTotal = total ?? summary.total;
+  const { lookup, error } = useWindow(fetcher, viewTotal, from, to);
   const active = Math.max(0, selected ?? 0);
   const columns = [...CORE_FIELDS, ...summary.extras];
   const template = `80px ${columns.map((key) => (key === "message" ? "360px" : key === "timestamp" ? "220px" : "160px")).join(" ")}`;
@@ -46,7 +52,7 @@ export function StructuredTable({
         ref={scrollRef}
         role="grid"
         aria-label="Structured logs"
-        aria-rowcount={summary.total + 1}
+        aria-rowcount={viewTotal + 1}
         aria-colcount={columns.length + 1}
         tabIndex={0}
         aria-activedescendant={
@@ -58,17 +64,17 @@ export function StructuredTable({
         onKeyDown={(event) => {
           const next =
             event.key === "ArrowDown"
-              ? Math.min(active + 1, summary.total - 1)
+              ? Math.min(active + 1, viewTotal - 1)
               : event.key === "ArrowUp"
                 ? Math.max(active - 1, 0)
                 : event.key === "Home"
                   ? 0
                   : event.key === "End"
-                    ? summary.total - 1
+                    ? viewTotal - 1
                     : event.key === "Enter"
                       ? active
                       : null;
-          if (next !== null && next >= 0 && next < summary.total) {
+          if (next !== null && next >= 0 && next < viewTotal) {
             event.preventDefault();
             virtual.scrollToIndex(next);
             onSelect(next);
@@ -119,6 +125,15 @@ export function StructuredTable({
                     className="sticky left-0 bg-background px-3 text-muted-foreground"
                   >
                     {entry.row + 1}
+                    {filterId !== undefined && !entry.failed && (
+                      <span
+                        className="ml-1 text-primary"
+                        title="Matches current filter"
+                        aria-label="Filter match"
+                      >
+                        ●
+                      </span>
+                    )}
                     {entry.failed && (
                       <span
                         className="ml-1 text-red-300"
@@ -146,6 +161,11 @@ export function StructuredTable({
                         >
                           {String(entry.record.level)}
                         </span>
+                      ) : key === "message" ? (
+                        <HighlightText
+                          text={displayValue(entry.record[key]).slice(0, 2000)}
+                          ranges={entry.highlights}
+                        />
                       ) : (
                         displayValue(entry.record[key]).slice(0, 2000) || "—"
                       )}
@@ -156,9 +176,11 @@ export function StructuredTable({
             })}
           </div>
         </div>
-        {!summary.total && (
+        {!viewTotal && (
           <p className="p-6 text-sm text-muted-foreground">
-            No records. Blank lines and CSV headers are skipped.
+            {filterId !== undefined
+              ? "No matching records."
+              : "No records. Blank lines and CSV headers are skipped."}
           </p>
         )}
       </div>

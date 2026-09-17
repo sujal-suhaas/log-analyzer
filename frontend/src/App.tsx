@@ -29,11 +29,14 @@ import {
 import { FileImport } from "@/components/file-import";
 import { LogTable } from "@/components/log-table";
 import { StructuredTable } from "@/components/structured-table";
+import { LogFilters } from "@/components/log-filters";
+import { HighlightText } from "@/components/highlight";
 import { QueryPresets } from "@/components/query-presets";
 import { PARSERS, type ParserId } from "@/lib/parsers";
 import { displayValue } from "@/lib/parsers/types";
 import { ACCEPT, formatBytes, type ImportProgress } from "@/lib/read-log-file";
 import { LogWorkerClient } from "@/lib/worker/log-client";
+import type { FilterSummary } from "@/lib/filters";
 import type { LogDetail, LogEvent, LogSummary } from "@/lib/worker/messages";
 
 function App() {
@@ -48,6 +51,7 @@ function App() {
   );
   const [client] = useState(() => new LogWorkerClient());
   const [log, setLog] = useState<LogSummary | null>(null);
+  const [filterResult, setFilterResult] = useState<FilterSummary | null>(null);
   const [parser, setParser] = useState<ParserId>("plain");
   const [view, setView] = useState<"raw" | "structured">("structured");
   const [parsing, setParsing] = useState(false);
@@ -93,7 +97,7 @@ function App() {
     let ignore = false;
     if (log && selected !== null)
       void client
-        .detail(log.revision, selected, view === "structured")
+        .detail(log.revision, selected, view === "structured", filterResult?.id)
         .then((value) => {
           if (!ignore)
             setLoadedDetail({
@@ -114,7 +118,7 @@ function App() {
     return () => {
       ignore = true;
     };
-  }, [client, log, selected, view]);
+  }, [client, log, selected, view, filterResult]);
 
   function reportProgress(event: LogEvent) {
     if (event.type === "READ_PROGRESS")
@@ -387,8 +391,19 @@ function App() {
               {copied ? "Copied" : "Copy"}
             </Button>
           </div>
-          <pre aria-label="Raw log content" className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-3 font-mono text-xs leading-6 text-zinc-300">
-            {detail ? raw || "(empty line)" : "Loading…"}
+          <pre
+            aria-label="Raw log content"
+            className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-3 font-mono text-xs leading-6 text-zinc-300"
+          >
+            {detail ? (
+              raw ? (
+                <HighlightText text={raw} ranges={detail.highlights} />
+              ) : (
+                "(empty line)"
+              )
+            ) : (
+              "Loading…"
+            )}
           </pre>
         </div>
       )}
@@ -458,7 +473,7 @@ function App() {
                   variant="outline"
                   className="text-[9px] text-muted-foreground"
                 >
-                  PHASE 04
+                  PHASE 05
                 </Badge>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
@@ -647,12 +662,34 @@ function App() {
           </div>
         )}
         {log && (
+          <LogFilters
+            client={client}
+            revision={log.revision}
+            disabled={!!pending}
+            hasTime={log.hasTime}
+            onChange={(result) => {
+              setFilterResult(result);
+              setSelected(null);
+              setDetailsOpen(false);
+            }}
+          />
+        )}
+        {log && (
           <QueryPresets
             key={log.revision}
             client={client}
             revision={log.revision}
             disabled={!!pending}
           />
+        )}
+        {log && filterResult && (
+          <p
+            aria-label="Filter results"
+            className="mx-4 mb-3 text-xs text-muted-foreground sm:mx-7"
+          >
+            {filterResult.total.toLocaleString()} matching records ·{" "}
+            {filterResult.lineCount.toLocaleString()} source lines
+          </p>
         )}
         <section
           className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border bg-card/30 sm:mx-7 sm:mb-6"
@@ -707,18 +744,23 @@ function App() {
               <div className="flex min-w-0 flex-1 flex-col">
                 {view === "structured" ? (
                   <StructuredTable
-                    key={`structured-${log.revision}`}
+                    key={`structured-${log.revision}-${filterResult?.id ?? "all"}`}
                     client={client}
                     summary={log}
+                    filterId={filterResult?.id}
+                    total={filterResult ? filterResult.total : null}
                     selected={selected}
                     onSelect={selectLine}
                   />
                 ) : log.lineCount ? (
                   <LogTable
-                    key={`raw-${log.revision}`}
+                    key={`raw-${log.revision}-${filterResult?.id ?? "all"}`}
                     client={client}
                     revision={log.revision}
-                    lineCount={log.lineCount}
+                    lineCount={
+                      filterResult ? filterResult.lineCount : log.lineCount
+                    }
+                    filterId={filterResult?.id}
                     selected={selected}
                     onSelect={selectLine}
                   />

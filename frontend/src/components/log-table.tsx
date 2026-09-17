@@ -1,5 +1,6 @@
 import { useCallback, useRef } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
+import { HighlightText } from "@/components/highlight";
 import { useWindow } from "@/lib/use-window";
 import type { LogWorkerClient } from "@/lib/worker/log-client";
 
@@ -7,12 +8,14 @@ export function LogTable({
   client,
   revision,
   lineCount,
+  filterId,
   selected,
   onSelect,
 }: {
   client: LogWorkerClient;
   revision: number;
   lineCount: number;
+  filterId?: number;
   selected: number | null;
   onSelect: (index: number) => void;
 }) {
@@ -27,8 +30,9 @@ export function LogTable({
   const from = range[0]?.index ?? 0;
   const to = range[range.length - 1]?.index ?? -1;
   const fetcher = useCallback(
-    (start: number, count: number) => client.rawRows(revision, start, count),
-    [client, revision],
+    (start: number, count: number) =>
+      client.rawRows(revision, start, count, filterId),
+    [client, revision, filterId],
   );
   const { lookup, error } = useWindow(fetcher, lineCount, from, to);
   const active = selected ?? 0;
@@ -69,7 +73,7 @@ export function LogTable({
           if (next !== null && next >= 0) {
             e.preventDefault();
             virtual.scrollToIndex(next);
-            onSelect(next);
+            onSelect(lookup(next)?.row ?? next);
           }
           if (e.key === "Enter" && lineCount) {
             e.preventDefault();
@@ -85,26 +89,30 @@ export function LogTable({
           }}
         >
           {range.map((row) => {
-            const raw = lookup(row.index) ?? "";
+            const entry = lookup(row.index);
+            const raw = entry?.raw ?? "";
             return (
               <div
                 id={`log-line-${row.index}`}
                 key={row.key}
                 role="option"
-                aria-selected={selected === row.index}
-                onClick={() => onSelect(row.index)}
-                className={`absolute left-0 top-0 flex w-max min-w-full cursor-pointer items-center border-b border-white/[.025] font-mono text-xs hover:bg-white/[.035] ${selected === row.index ? "bg-primary/10 text-primary" : "text-zinc-400"}`}
+                aria-selected={selected === (entry?.row ?? row.index)}
+                onClick={() => onSelect(entry?.row ?? row.index)}
+                className={`absolute left-0 top-0 flex w-max min-w-full cursor-pointer items-center border-b border-white/[.025] font-mono text-xs hover:bg-white/[.035] ${selected === (entry?.row ?? row.index) ? "bg-primary/10 text-primary" : "text-zinc-400"}`}
                 style={{
                   height: row.size,
                   transform: `translateY(${row.start}px)`,
                 }}
               >
                 <span className="sticky left-0 w-20 shrink-0 bg-background/95 pr-5 text-right text-[10px] text-muted-foreground">
-                  {(row.index + 1).toLocaleString()}
+                  {((entry?.row ?? row.index) + 1).toLocaleString()}
                 </span>
                 {/* ponytail: preview capped at 2K chars; full line remains in detail panel. */}
                 <span className="whitespace-pre pr-8">
-                  {raw.slice(0, 2000) || " "}
+                  <HighlightText
+                    text={raw.slice(0, 2000) || " "}
+                    ranges={entry?.highlights}
+                  />
                   {raw.length > 2000 ? " … [open full line]" : ""}
                 </span>
               </div>
