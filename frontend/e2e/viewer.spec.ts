@@ -28,7 +28,9 @@ test('Phase 1: health, file import, raw detail, large virtual scroll, cancel and
   writeFileSync(largePath, data)
   await picker.setInputFiles(largePath)
   await expect(page.getByRole('button', { name: 'Cancel import' })).toHaveCount(0, { timeout: 45_000 })
-  await expect(page.getByText('200,001', { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('main').getByText('200,001', { exact: true }),
+  ).toBeVisible()
   console.log(`50 MiB import: ${Date.now() - started} ms`)
   const list = page.getByRole('listbox')
   await list.focus()
@@ -46,7 +48,9 @@ test('Phase 1: health, file import, raw detail, large virtual scroll, cancel and
   await picker.setInputFiles(largePath)
   await page.getByRole('button', { name: 'Cancel import' }).click()
   await expect(page.getByRole('button', { name: 'Cancel import' })).toHaveCount(0)
-  await expect(page.getByText('200,001', { exact: true })).toBeVisible()
+  await expect(
+    page.getByRole('main').getByText('200,001', { exact: true }),
+  ).toBeVisible()
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.getByRole('dialog')).toBeVisible()
   await page.keyboard.press('Escape')

@@ -39,6 +39,17 @@ import { LogWorkerClient } from "@/lib/worker/log-client";
 import type { FilterSummary } from "@/lib/filters";
 import type { LogDetail, LogEvent, LogSummary } from "@/lib/worker/messages";
 
+// One entry per imported file. Only the active file is parsed inside the Worker;
+// the rest stay as File handles so switching can reload them on demand.
+type ImportedFile = {
+  id: number;
+  file: File;
+  name: string;
+  size: number;
+  parser: ParserId;
+  lines: number | null;
+};
+
 function App() {
   const compact = useSyncExternalStore(
     (on) => {
@@ -51,6 +62,9 @@ function App() {
   );
   const [client] = useState(() => new LogWorkerClient());
   const [log, setLog] = useState<LogSummary | null>(null);
+  const [files, setFiles] = useState<ImportedFile[]>([]);
+  const [activeId, setActiveId] = useState<number | null>(null);
+  const fileId = useRef(0);
   const [filterResult, setFilterResult] = useState<FilterSummary | null>(null);
   const [parser, setParser] = useState<ParserId>("plain");
   const [view, setView] = useState<"raw" | "structured">("structured");
@@ -82,6 +96,9 @@ function App() {
       ? loadedDetail.value
       : null;
   const operation = useRef(0);
+  // File instance currently parsed in the Worker; re-importing a file hands over a
+  // new instance, so identity (not entry id) decides whether a reload is needed.
+  const loadedFile = useRef<File | null>(null);
   const picker = useRef<HTMLInputElement>(null);
   const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -129,33 +146,74 @@ function App() {
     }
   }
 
-  async function importFiles(files: File[]) {
-    if (files.length !== 1) {
-      setError("Choose one file at a time.");
-      return;
+  async function importFiles(incoming: File[]) {
+    if (!incoming.length) return;
+    const next = [...files];
+    let target: ImportedFile | null = null;
+    for (const item of incoming) {
+      const at = next.findIndex((entry) => entry.name === item.name);
+      target =
+        at >= 0
+          ? { ...next[at], file: item }
+          : {
+              id: ++fileId.current,
+              file: item,
+              name: item.name,
+              size: item.size,
+              parser,
+              lines: null,
+            };
+      if (at >= 0) next[at] = target;
+      else next.push(target);
     }
-    const file = files[0];
+    setFiles(next);
+    // The file just handed over is the one the user asked for.
+    await activate(target as ImportedFile);
+  }
+
+  async function activate(entry: ImportedFile) {
+    if (entry.id === activeId && loadedFile.current === entry.file) return;
     const id = ++operation.current;
-    setPending({ name: file.name, size: file.size });
+    setPending({ name: entry.name, size: entry.size });
     setProgress({ bytes: 0, lines: 0 });
     setError("");
     setNotice("");
     setParsing(false);
     setParsedRows(0);
     try {
-      const summary = await client.loadFile(file, parser, (event) => {
-        if (operation.current === id) reportProgress(event);
-      });
+      const summary = await client.loadFile(
+        entry.file,
+        entry.parser,
+        (event) => {
+          if (operation.current === id) reportProgress(event);
+        },
+      );
       if (operation.current !== id) return;
       setLoadedDetail(null);
-      setLog(summary);
+      // Only a completed load may drop the previous dataset's view state.
+      setFilterResult(null);
       setSelected(null);
       setDetailsOpen(false);
+      setFiles((current) =>
+        current.map((item) =>
+          item.id === entry.id
+            ? { ...item, parser: entry.parser, lines: summary.lineCount }
+            : item,
+        ),
+      );
+      setActiveId(entry.id);
+      loadedFile.current = entry.file;
+      setParser(entry.parser);
+      setLog(summary);
       setNotice(
         `Imported ${summary.lineCount.toLocaleString()} lines. File stays in this browser tab.`,
       );
     } catch (cause) {
       if (operation.current !== id) return;
+      // A file that never parsed is not a dataset; keep entries that already loaded.
+      setFiles((current) =>
+        current.filter((item) => item.id !== entry.id || item.lines !== null),
+      );
       if (cause instanceof Error && cause.name === "AbortError") {
         setNotice("Import cancelled. Previous file kept.");
       } else {
@@ -173,6 +231,33 @@ function App() {
         setParsing(false);
       }
     }
+  }
+
+  function removeFile(entry: ImportedFile) {
+    const index = files.findIndex((item) => item.id === entry.id);
+    const next = files.filter((item) => item.id !== entry.id);
+    setFiles(next);
+    if (entry.id !== activeId) return;
+    if (!next.length) {
+      clearAll();
+      return;
+    }
+    void activate(next[Math.min(index, next.length - 1)]);
+  }
+
+  function clearAll() {
+    operation.current++;
+    client.dispose();
+    loadedFile.current = null;
+    setLoadedDetail(null);
+    setError("");
+    setLog(null);
+    setFiles([]);
+    setActiveId(null);
+    setFilterResult(null);
+    setSelected(null);
+    setDetailsOpen(false);
+    setNotice("Dataset cleared.");
   }
 
   async function reparse(nextParser: ParserId) {
@@ -194,6 +279,13 @@ function App() {
       if (operation.current !== id) return;
       setLoadedDetail(null);
       setParser(nextParser);
+      setFiles((current) =>
+        current.map((item) =>
+          item.id === activeId
+            ? { ...item, parser: nextParser, lines: summary.lineCount }
+            : item,
+        ),
+      );
       setLog(summary);
       setSelected(null);
       setDetailsOpen(false);
@@ -275,16 +367,45 @@ function App() {
           <span className="ml-auto size-1.5 rounded-full bg-primary" />
         </button>
         <div className="mt-8 flex items-center justify-between px-2 text-[9px] font-medium tracking-[.15em] text-muted-foreground">
-          <span>ACTIVE DATASET</span>
-          <span>{log ? "01" : "00"}</span>
+          <span>DATASETS</span>
+          <span>{String(files.length).padStart(2, "0")}</span>
         </div>
-        {log ? (
-          <div className="mt-3 flex items-center gap-2 rounded px-2 py-3 text-xs">
-            <FileText size={15} className="shrink-0 text-primary" />
-            <span className="truncate" title={log.name}>
-              {log.name}
-            </span>
-          </div>
+        {files.length ? (
+          <ul className="mt-3 space-y-1">
+            {files.map((entry) => (
+              <li key={entry.id} className="group flex items-center gap-0.5">
+                <button
+                  onClick={() => {
+                    setNavOpen(false);
+                    void activate(entry);
+                  }}
+                  disabled={!!pending}
+                  aria-current={entry.id === activeId ? "true" : undefined}
+                  className={`flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-2 text-xs disabled:opacity-50 ${entry.id === activeId ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-white/5"}`}
+                >
+                  <FileText size={15} className="shrink-0" />
+                  <span className="truncate" title={entry.name}>
+                    {entry.name}
+                  </span>
+                  {entry.lines !== null && (
+                    <span className="ml-auto shrink-0 font-mono text-[9px]">
+                      {entry.lines.toLocaleString()}
+                    </span>
+                  )}
+                </button>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  aria-label={`Remove ${entry.name}`}
+                  disabled={!!pending}
+                  onClick={() => removeFile(entry)}
+                  className="size-7 shrink-0 opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
+                >
+                  <X size={13} />
+                </Button>
+              </li>
+            ))}
+          </ul>
         ) : (
           <p className="px-2 py-4 text-xs text-muted-foreground">
             No file imported yet
@@ -493,7 +614,9 @@ function App() {
             {[
               {
                 label: "ACTIVE FILE",
-                value: log ? "1 dataset" : "No dataset",
+                value: files.length
+                  ? `${files.length} dataset${files.length === 1 ? "" : "s"}`
+                  : "No dataset",
                 sub: log?.name ?? "Import a file to get started",
                 icon: FolderOpen,
               },
@@ -543,6 +666,7 @@ function App() {
           className="hidden"
           type="file"
           accept={ACCEPT}
+          multiple
           onChange={(e) => {
             if (e.target.files) void importFiles(Array.from(e.target.files));
             e.target.value = "";
@@ -663,6 +787,7 @@ function App() {
         )}
         {log && (
           <LogFilters
+            key={`filters-${log.revision}`}
             client={client}
             revision={log.revision}
             disabled={!!pending}
@@ -708,16 +833,7 @@ function App() {
                 variant="ghost"
                 size="sm"
                 disabled={!!pending}
-                onClick={() => {
-                  operation.current++;
-                  client.dispose();
-                  setLoadedDetail(null);
-                  setError("");
-                  setLog(null);
-                  setSelected(null);
-                  setDetailsOpen(false);
-                  setNotice("Dataset cleared.");
-                }}
+                onClick={clearAll}
               >
                 <Trash2 size={13} />
                 Clear
