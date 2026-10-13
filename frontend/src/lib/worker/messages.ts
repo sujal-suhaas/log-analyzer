@@ -1,5 +1,5 @@
 import type { ParsedRecord, ParserId } from "../parsers/types";
-import type { QueryPreset, QueryResult } from "../queries";
+import type { QueryResult } from "../queries";
 import type { Filters, FilterSummary, Highlight } from "../filters";
 
 // Worker owns text, offsets and records. UI receives summaries and bounded windows.
@@ -22,6 +22,44 @@ export type LogDetail = {
   entry: RecordEntry | null;
   highlights?: Highlight[];
 };
+export type AnalyticsGranularity = "minute" | "hour" | "day" | "week";
+export type AnalyticsTimePoint = {
+  startMs: number;
+  endMs: number;
+  logs: number;
+  errors: number;
+};
+export type AnalyticsCountPoint = { value: string | null; count: number };
+export type AnalyticsStatusPoint = { status: number | null; count: number };
+export type AnalyticsMessagePoint = {
+  filterText: string;
+  label: string;
+  count: number;
+  truncated: boolean;
+};
+export type AnalyticsSnapshot = {
+  revision: number;
+  scope: {
+    totalLogs: number;
+    errorLogs: number;
+    timestampedLogs: number;
+    minTimeMs: number | null;
+    maxTimeMs: number | null;
+  };
+  time: {
+    granularity: AnalyticsGranularity | null;
+    points: AnalyticsTimePoint[];
+  };
+  levels: AnalyticsCountPoint[];
+  services: { points: AnalyticsCountPoint[]; hasMore: boolean };
+  errorMessages: { points: AnalyticsMessagePoint[]; hasMore: boolean };
+  statusCodes: AnalyticsStatusPoint[];
+  latency: {
+    sampleCount: number;
+    averageMs: number | null;
+    p95Ms: number | null;
+  };
+};
 export type LogRequest =
   | { id: number; type: "LOAD_FILE"; file: File; parser: ParserId }
   | { id: number; type: "PARSE_FILE"; parser: ParserId }
@@ -42,7 +80,8 @@ export type LogRequest =
       structured: boolean;
       filterId?: number;
     }
-  | { id: number; type: "RUN_QUERY"; revision: number; preset: QueryPreset }
+  | { id: number; type: "RUN_QUERY"; revision: number; sql: string }
+  | { id: number; type: "GET_ANALYTICS"; revision: number; filters: Filters }
   | { id: number; type: "FILTER"; revision: number; filters: Filters }
   | { id: number; type: "CANCEL"; target: number };
 export type RequestPayload = LogRequest extends infer R
@@ -61,6 +100,7 @@ export type LogResponse =
         | RecordEntry[]
         | LogDetail
         | QueryResult
+        | AnalyticsSnapshot
         | null;
     }
   | { id: number; ok: false; error: string; name: string };

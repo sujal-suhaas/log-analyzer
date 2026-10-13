@@ -1,11 +1,12 @@
 import type { Filters, FilterSummary } from "../filters";
 import type { ParserId } from "../parsers/types";
-import type { QueryPreset, QueryResult } from "../queries";
+import type { QueryResult } from "../queries";
 import type {
   LogDetail,
   LogEvent,
   LogResponse,
   LogSummary,
+  AnalyticsSnapshot,
   RecordEntry,
   RawEntry,
   RequestPayload,
@@ -116,8 +117,16 @@ export class LogWorkerClient {
     return this.request<LogSummary>({ type: "PARSE_FILE", parser }, onProgress);
   }
 
-  query(revision: number, preset: QueryPreset) {
-    return this.request<QueryResult>({ type: "RUN_QUERY", revision, preset });
+  query(revision: number, sql: string) {
+    return this.request<QueryResult>({ type: "RUN_QUERY", revision, sql });
+  }
+
+  analytics(revision: number, filters: Filters) {
+    return this.request<AnalyticsSnapshot>({
+      type: "GET_ANALYTICS",
+      revision,
+      filters,
+    });
   }
 
   filter(revision: number, filters: Filters) {

@@ -4,8 +4,16 @@ import workerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url"
 import { CORE_FIELDS, type ParsedDataset } from "../parsers/types";
 import { recordRaw } from "../parsers";
 import type { LogFile } from "../read-log-file";
-import { QUERIES, type QueryPreset, type QueryResult } from "../queries";
+import { SQL_LIMIT, type QueryResult } from "../queries";
 import { filterWhere, type Filters, type Highlight } from "../filters";
+import type {
+  AnalyticsCountPoint,
+  AnalyticsGranularity,
+  AnalyticsMessagePoint,
+  AnalyticsSnapshot,
+  AnalyticsStatusPoint,
+  AnalyticsTimePoint,
+} from "./messages";
 
 let engine: Promise<{
   db: duckdb.AsyncDuckDB;
@@ -94,29 +102,392 @@ function withDatabase<T>(
   return task;
 }
 
-export function runPreset(
+// 100 KB is far past any hand-written query and keeps a paste bomb out of the engine.
+const SQL_MAX = 100_000;
+
+function shapeResult(
+  result: {
+    schema: { fields: { name: string }[] };
+    numRows: number;
+    toArray: () => Record<string, unknown>[];
+  },
+  started: number,
+): QueryResult {
+  const rows = result.toArray();
+  const shown = rows.slice(0, SQL_LIMIT);
+  return {
+    columns: result.schema.fields.map((field) => field.name),
+    rows: shown.map((row) =>
+      result.schema.fields.map((field) =>
+        row[field.name] == null ? "NULL" : String(row[field.name]),
+      ),
+    ),
+    elapsedMs: performance.now() - started,
+    truncated: Math.max(0, result.numRows - shown.length),
+  };
+}
+
+const MUTATING_KEYWORDS = new Set([
+  "ALTER",
+  "ATTACH",
+  "CALL",
+  "COPY",
+  "CREATE",
+  "DELETE",
+  "DETACH",
+  "DROP",
+  "EXPORT",
+  "GRANT",
+  "IMPORT",
+  "INSTALL",
+  "INSERT",
+  "LOAD",
+  "MERGE",
+  "PRAGMA",
+  "REVOKE",
+  "SET",
+  "TRUNCATE",
+  "UPDATE",
+  "VACUUM",
+]);
+const READ_ONLY_KEYWORDS = new Set([
+  "DESCRIBE",
+  "DESC",
+  "EXPLAIN",
+  "FROM",
+  "SELECT",
+  "SHOW",
+  "SUMMARIZE",
+  "TABLE",
+  "VALUES",
+  "WITH",
+]);
+
+function validateReadOnlySql(sql: string) {
+  const topLevelKeywords: string[] = [];
+  let depth = 0;
+  let semicolons = 0;
+  let state: "normal" | "single" | "double" | "backtick" | "line" | "block" =
+    "normal";
+
+  for (let index = 0; index < sql.length; index++) {
+    const character = sql[index];
+    const next = sql[index + 1];
+
+    if (state === "line") {
+      if (character === "\n" || character === "\r") state = "normal";
+      continue;
+    }
+    if (state === "block") {
+      if (character === "*" && next === "/") {
+        state = "normal";
+        index++;
+      }
+      continue;
+    }
+    if (state === "single") {
+      if (character === "'" && next === "'") index++;
+      else if (character === "'") state = "normal";
+      continue;
+    }
+    if (state === "double") {
+      if (character === '"' && next === '"') index++;
+      else if (character === '"') state = "normal";
+      continue;
+    }
+    if (state === "backtick") {
+      if (character === "`" && next === "`") index++;
+      else if (character === "`") state = "normal";
+      continue;
+    }
+
+    if (character === "-" && next === "-") {
+      state = "line";
+      index++;
+      continue;
+    }
+    if (character === "/" && next === "*") {
+      state = "block";
+      index++;
+      continue;
+    }
+    if (character === "'") {
+      state = "single";
+      continue;
+    }
+    if (character === '"') {
+      state = "double";
+      continue;
+    }
+    if (character === "`") {
+      state = "backtick";
+      continue;
+    }
+    if (character === "(") {
+      depth++;
+      continue;
+    }
+    if (character === ")") {
+      depth = Math.max(0, depth - 1);
+      continue;
+    }
+    if (character === ";") {
+      if (depth === 0) semicolons++;
+      continue;
+    }
+    if (depth === 0 && /[A-Za-z_]/.test(character)) {
+      let end = index + 1;
+      while (end < sql.length && /[A-Za-z0-9_$]/.test(sql[end])) end++;
+      topLevelKeywords.push(sql.slice(index, end).toUpperCase());
+      index = end - 1;
+    }
+  }
+
+  const first = topLevelKeywords[0];
+  if (!first || !READ_ONLY_KEYWORDS.has(first))
+    throw new Error(
+      "Only read-only SQL queries are allowed in the Query workspace.",
+    );
+  if (topLevelKeywords.some((keyword) => MUTATING_KEYWORDS.has(keyword)))
+    throw new Error(
+      "Only read-only SQL queries are allowed in the Query workspace.",
+    );
+  if (semicolons > 1)
+    throw new Error("Run one read-only SQL statement at a time.");
+}
+
+export function runSql(
   revision: number,
   log: LogFile,
   dataset: ParsedDataset,
-  preset: QueryPreset,
+  sql: string,
 ): Promise<QueryResult> {
-  if (!Object.hasOwn(QUERIES, preset))
-    return Promise.reject(new Error("Unknown query preset."));
+  if (typeof sql !== "string" || !sql.trim())
+    return Promise.reject(new Error("Enter a query first."));
+  if (sql.length > SQL_MAX)
+    return Promise.reject(new Error("Query is too long (100 KB maximum)."));
+  if (sql.includes("\0"))
+    return Promise.reject(new Error("Query contains a null character."));
+  try {
+    validateReadOnlySql(sql);
+  } catch (error) {
+    return Promise.reject(error);
+  }
   return withDatabase(revision, log, dataset, async (connection) => {
     const started = performance.now();
-    const result = await connection.query(QUERIES[preset].sql);
-    return {
-      columns: result.schema.fields.map((field) => field.name),
-      rows: result
-        .toArray()
-        .map((row) =>
-          result.schema.fields.map((field) =>
-            row[field.name] == null ? "NULL" : String(row[field.name]),
-          ),
-        ),
-      elapsedMs: performance.now() - started,
-    };
+    const result = await connection.query(sql);
+    return shapeResult(result, started);
   });
+}
+
+const ERROR_LEVELS_SQL =
+  "level IN ('ERROR', 'FATAL', 'CRITICAL', 'CRIT', 'EMERG', 'ALERT')";
+const MAX_CATEGORY_POINTS = 10;
+const MESSAGE_LIMIT = 160;
+type DatabaseRow = Record<string, unknown>;
+
+async function rows(
+  connection: duckdb.AsyncDuckDBConnection,
+  sql: string,
+  params: (string | number)[],
+): Promise<DatabaseRow[]> {
+  const statement = await connection.prepare(sql);
+  try {
+    const result = await statement.query(...params);
+    return result.toArray() as DatabaseRow[];
+  } finally {
+    await statement.close();
+  }
+}
+
+function numeric(value: unknown): number {
+  return value == null ? 0 : Number(value);
+}
+
+function nullableNumber(value: unknown): number | null {
+  return value == null ? null : Number(value);
+}
+
+function nullableString(value: unknown): string | null {
+  return value == null ? null : String(value);
+}
+
+function chooseGranularity(
+  minTimeMs: number,
+  maxTimeMs: number,
+): AnalyticsGranularity {
+  const range = maxTimeMs - minTimeMs;
+  if (range <= 6 * 60 * 60 * 1000) return "minute";
+  if (range <= 2 * 24 * 60 * 60 * 1000) return "hour";
+  if (range <= 90 * 24 * 60 * 60 * 1000) return "day";
+  return "week";
+}
+
+function bucketEnd(startMs: number, granularity: AnalyticsGranularity) {
+  const duration = {
+    minute: 60 * 1000,
+    hour: 60 * 60 * 1000,
+    day: 24 * 60 * 60 * 1000,
+    week: 7 * 24 * 60 * 60 * 1000,
+  }[granularity];
+  return startMs + duration;
+}
+
+function bucketMilliseconds(granularity: AnalyticsGranularity) {
+  return {
+    minute: 60 * 1000,
+    hour: 60 * 60 * 1000,
+    day: 24 * 60 * 60 * 1000,
+    week: 7 * 24 * 60 * 60 * 1000,
+  }[granularity];
+}
+
+async function analyticsSnapshot(
+  connection: duckdb.AsyncDuckDBConnection,
+  revision: number,
+  filters: Filters,
+): Promise<AnalyticsSnapshot> {
+  const where = filterWhere(filters);
+  const scope = (
+    await rows(
+      connection,
+      `SELECT
+         COUNT(*) AS total_logs,
+         SUM(CASE WHEN ${ERROR_LEVELS_SQL} THEN 1 ELSE 0 END) AS error_logs,
+         COUNT(timestamp) AS timestamped_logs,
+         epoch_ms(MIN(timestamp)) AS min_time_ms,
+         epoch_ms(MAX(timestamp)) AS max_time_ms,
+         COUNT(duration_ms) AS latency_samples,
+         AVG(duration_ms) AS average_ms,
+         quantile_cont(duration_ms, 0.95) AS p95_ms
+       FROM logs
+       WHERE ${where.sql}`,
+      where.params,
+    )
+  )[0];
+  const minTimeMs = nullableNumber(scope.min_time_ms);
+  const maxTimeMs = nullableNumber(scope.max_time_ms);
+  const granularity =
+    minTimeMs !== null && maxTimeMs !== null
+      ? chooseGranularity(minTimeMs, maxTimeMs)
+      : null;
+
+  let timePoints: AnalyticsTimePoint[] = [];
+  if (granularity) {
+    const bucketMs = bucketMilliseconds(granularity);
+    const timeRows = await rows(
+      connection,
+      `SELECT
+         FLOOR(epoch_ms(timestamp) / ${bucketMs}) * ${bucketMs} AS start_ms,
+         COUNT(*) AS logs,
+         SUM(CASE WHEN ${ERROR_LEVELS_SQL} THEN 1 ELSE 0 END) AS errors
+       FROM logs
+       WHERE ${where.sql} AND timestamp IS NOT NULL
+       GROUP BY 1
+       ORDER BY 1`,
+      where.params,
+    );
+    timePoints = timeRows.map((row) => {
+      const startMs = numeric(row.start_ms);
+      return {
+        startMs,
+        endMs: bucketEnd(startMs, granularity),
+        logs: numeric(row.logs),
+        errors: numeric(row.errors),
+      };
+    });
+  }
+
+  const levelRows = await rows(
+    connection,
+    `SELECT level AS value, COUNT(*) AS count
+     FROM logs WHERE ${where.sql}
+     GROUP BY level ORDER BY count DESC, value ASC NULLS LAST`,
+    where.params,
+  );
+  const serviceRows = await rows(
+    connection,
+    `SELECT service AS value, COUNT(*) AS count
+     FROM logs WHERE ${where.sql}
+     GROUP BY service ORDER BY count DESC, value ASC NULLS LAST
+     LIMIT ${MAX_CATEGORY_POINTS + 1}`,
+    where.params,
+  );
+  const messageRows = await rows(
+    connection,
+    `SELECT message AS value, COUNT(*) AS count
+     FROM logs WHERE ${where.sql} AND ${ERROR_LEVELS_SQL} AND message IS NOT NULL
+     GROUP BY message ORDER BY count DESC, value ASC
+     LIMIT ${MAX_CATEGORY_POINTS + 1}`,
+    where.params,
+  );
+  const statusRows = await rows(
+    connection,
+    `SELECT status, COUNT(*) AS count
+     FROM logs WHERE ${where.sql}
+     GROUP BY status ORDER BY status ASC NULLS LAST`,
+    where.params,
+  );
+  const messagePoints: AnalyticsMessagePoint[] = messageRows
+    .slice(0, MAX_CATEGORY_POINTS)
+    .map((row) => {
+      const value = String(row.value);
+      const filterText = value.slice(0, MESSAGE_LIMIT);
+      return {
+        filterText,
+        label: value.slice(0, 80),
+        count: numeric(row.count),
+        truncated: filterText.length < value.length,
+      };
+    });
+
+  const toCounts = (values: DatabaseRow[]): AnalyticsCountPoint[] =>
+    values.map((row) => ({
+      value: nullableString(row.value),
+      count: numeric(row.count),
+    }));
+  const statusCodes: AnalyticsStatusPoint[] = statusRows.map((row) => ({
+    status: nullableNumber(row.status),
+    count: numeric(row.count),
+  }));
+
+  return {
+    revision,
+    scope: {
+      totalLogs: numeric(scope.total_logs),
+      errorLogs: numeric(scope.error_logs),
+      timestampedLogs: numeric(scope.timestamped_logs),
+      minTimeMs,
+      maxTimeMs,
+    },
+    time: { granularity, points: timePoints },
+    levels: toCounts(levelRows),
+    services: {
+      points: toCounts(serviceRows.slice(0, MAX_CATEGORY_POINTS)),
+      hasMore: serviceRows.length > MAX_CATEGORY_POINTS,
+    },
+    errorMessages: {
+      points: messagePoints,
+      hasMore: messageRows.length > MAX_CATEGORY_POINTS,
+    },
+    statusCodes,
+    latency: {
+      sampleCount: numeric(scope.latency_samples),
+      averageMs: nullableNumber(scope.average_ms),
+      p95Ms: nullableNumber(scope.p95_ms),
+    },
+  };
+}
+
+export function getAnalytics(
+  revision: number,
+  log: LogFile,
+  dataset: ParsedDataset,
+  filters: Filters,
+) {
+  return withDatabase(revision, log, dataset, (connection) =>
+    analyticsSnapshot(connection, revision, filters),
+  );
 }
 
 export function filterLines(

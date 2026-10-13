@@ -124,15 +124,23 @@ self.onmessage = async ({ data: request }: MessageEvent<LogRequest>) => {
       return;
     }
     if (request.type === "RUN_QUERY") {
-      const { runPreset } = await import("./database");
-      const result = await runPreset(
+      const { runSql } = await import("./database");
+      const result = await runSql(request.revision, log, dataset, request.sql);
+      if (current?.revision !== request.revision)
+        throw new Error("Dataset changed. Run query again.");
+      respond({ id: request.id, ok: true, result });
+      return;
+    }
+    if (request.type === "GET_ANALYTICS") {
+      const { getAnalytics } = await import("./database");
+      const result = await getAnalytics(
         request.revision,
         log,
         dataset,
-        request.preset,
+        request.filters,
       );
       if (current?.revision !== request.revision)
-        throw new Error("Dataset changed. Run query again.");
+        throw new Error("Dataset changed. Refresh analytics.");
       respond({ id: request.id, ok: true, result });
       return;
     }

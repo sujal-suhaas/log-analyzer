@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { EMPTY_FILTERS, filterWhere } from "../src/lib/filters";
+import {
+  applyChartFilterPatch,
+  EMPTY_FILTERS,
+  filterWhere,
+} from "../src/lib/filters";
 
 describe("filterWhere", () => {
   test("empty filters are inactive and parameterless", () => {
@@ -94,5 +98,46 @@ describe("filterWhere", () => {
     expect(() =>
       filterWhere({ ...EMPTY_FILTERS, text: "a".repeat(1001) }),
     ).toThrow();
+  });
+});
+
+describe("applyChartFilterPatch", () => {
+  test("preserves unrelated filters when selecting a level", () => {
+    const filters = {
+      ...EMPTY_FILTERS,
+      service: "api",
+      statusMin: "400",
+      text: "timeout",
+    };
+    expect(applyChartFilterPatch(filters, { kind: "level", value: "error" })).toEqual({
+      ...filters,
+      level: "ERROR",
+    });
+  });
+
+  test("turns an exclusive chart bucket into an inclusive custom range", () => {
+    expect(
+      applyChartFilterPatch(EMPTY_FILTERS, {
+        kind: "time",
+        startMs: Date.parse("2026-01-01T00:00:00Z"),
+        endMs: Date.parse("2026-01-02T00:00:00Z"),
+      }),
+    ).toMatchObject({
+      time: "custom",
+      from: "2026-01-01T00:00:00.000Z",
+      to: "2026-01-01T23:59:59.999Z",
+    });
+  });
+
+  test("maps status and message clicks to existing explorer filters", () => {
+    expect(
+      applyChartFilterPatch(EMPTY_FILTERS, { kind: "status", value: 500 }),
+    ).toMatchObject({ statusMin: "500", statusMax: "500" });
+    expect(
+      applyChartFilterPatch(EMPTY_FILTERS, {
+        kind: "error-message",
+        filterText: "db timeout",
+      }),
+    ).toMatchObject({ text: "db timeout", regex: false });
   });
 });

@@ -33,7 +33,41 @@ export type FilterSummary = {
   lineCount: number;
   filters: Filters;
 };
+export type FilterPreset = { name: string; filters: Filters };
 export type Highlight = [number, number];
+export type ChartFilterPatch =
+  | { kind: "time"; startMs: number; endMs: number }
+  | { kind: "level"; value: string }
+  | { kind: "service"; value: string }
+  | { kind: "error-message"; filterText: string }
+  | { kind: "status"; value: number };
+
+export function applyChartFilterPatch(
+  filters: Filters,
+  patch: ChartFilterPatch,
+): Filters {
+  switch (patch.kind) {
+    case "time":
+      return {
+        ...filters,
+        time: "custom",
+        from: new Date(patch.startMs).toISOString(),
+        to: new Date(patch.endMs - 1).toISOString(),
+      };
+    case "level":
+      return { ...filters, level: patch.value.toUpperCase() };
+    case "service":
+      return { ...filters, service: patch.value };
+    case "error-message":
+      return { ...filters, text: patch.filterText, regex: false };
+    case "status":
+      return {
+        ...filters,
+        statusMin: String(patch.value),
+        statusMax: String(patch.value),
+      };
+  }
+}
 
 // Only fixed column names/operators enter SQL. All user values are bound parameters.
 export function filterWhere(filters: Filters) {

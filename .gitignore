@@ -6,3 +6,5 @@ blob-report/
 __pycache__/
 .venv/
 *.tsbuildinfo
+
+.serena/

@@ -1,7 +1,15 @@
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   Activity,
   ArrowUpFromLine,
+  BarChart3,
   Check,
   ChevronRight,
   Copy,
@@ -31,18 +39,36 @@ import { LogTable } from "@/components/log-table";
 import { StructuredTable } from "@/components/structured-table";
 import { LogFilters } from "@/components/log-filters";
 import { HighlightText } from "@/components/highlight";
-import { QueryPresets } from "@/components/query-presets";
+import { applyChartFilterPatch, EMPTY_FILTERS, type ChartFilterPatch, type FilterPreset, type FilterSummary, type Filters } from "@/lib/filters";
+import {
+  createDatasetId,
+  datasetRecord,
+  deleteDataset,
+  fileFromDataset,
+  loadWorkspace,
+  saveDataset,
+  saveFilters,
+  saveQueryState,
+  saveSettings,
+  clearDatasets,
+  saveFilterPreset,
+  deleteFilterPreset,
+} from "@/lib/persistence";
+import { QUERIES } from "@/lib/queries";
 import { PARSERS, type ParserId } from "@/lib/parsers";
 import { displayValue } from "@/lib/parsers/types";
 import { ACCEPT, formatBytes, type ImportProgress } from "@/lib/read-log-file";
 import { LogWorkerClient } from "@/lib/worker/log-client";
-import type { FilterSummary } from "@/lib/filters";
 import type { LogDetail, LogEvent, LogSummary } from "@/lib/worker/messages";
+
+// The query workspace carries the editor, so it loads only when that view opens.
+const QueryWorkspace = lazy(() => import("@/components/query-workspace"));
+const AnalyticsDashboard = lazy(() => import("@/components/analytics-dashboard"));
 
 // One entry per imported file. Only the active file is parsed inside the Worker;
 // the rest stay as File handles so switching can reload them on demand.
 type ImportedFile = {
-  id: number;
+  id: string;
   file: File;
   name: string;
   size: number;
@@ -63,11 +89,20 @@ function App() {
   const [client] = useState(() => new LogWorkerClient());
   const [log, setLog] = useState<LogSummary | null>(null);
   const [files, setFiles] = useState<ImportedFile[]>([]);
-  const [activeId, setActiveId] = useState<number | null>(null);
-  const fileId = useRef(0);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [filterResult, setFilterResult] = useState<FilterSummary | null>(null);
+  const [draftFilters, setDraftFilters] = useState<Filters>(EMPTY_FILTERS);
   const [parser, setParser] = useState<ParserId>("plain");
-  const [view, setView] = useState<"raw" | "structured">("structured");
+  const [view, setView] = useState<"raw" | "structured" | "query" | "analytics">(
+    "structured",
+  );
+  const [sql, setSql] = useState<string>(QUERIES.count.sql);
+  const [history, setHistory] = useState<string[]>([]);
+  const [saved, setSaved] = useState<{ name: string; sql: string }[]>([]);
+  const [restoreQueryOutput, setRestoreQueryOutput] = useState(false);
+  const [filterPresets, setFilterPresets] = useState<FilterPreset[]>([]);
+  const [hydrated, setHydrated] = useState(false);
+  const [persistenceError, setPersistenceError] = useState("");
   const [parsing, setParsing] = useState(false);
   const [parsedRows, setParsedRows] = useState(0);
   const [selected, setSelected] = useState<number | null>(null);
@@ -95,6 +130,7 @@ function App() {
     loadedDetail?.view === view
       ? loadedDetail.value
       : null;
+  const appliedFilters = filterResult?.filters ?? EMPTY_FILTERS;
   const operation = useRef(0);
   // File instance currently parsed in the Worker; re-importing a file hands over a
   // new instance, so identity (not entry id) decides whether a reload is needed.
@@ -110,6 +146,106 @@ function App() {
       if (copyTimer.current) clearTimeout(copyTimer.current);
     };
   }, [client]);
+  useEffect(() => {
+    let ignore = false;
+    void loadWorkspace()
+      .then(async (workspace) => {
+        if (ignore) return;
+        const validDatasets = workspace.datasets
+          .filter((dataset) => PARSERS.some((option) => option.id === dataset.parser))
+          .sort((left, right) => left.order - right.order)
+          .map((dataset) => ({
+            id: dataset.id,
+            file: fileFromDataset(dataset),
+            name: dataset.name,
+            size: dataset.size,
+            parser: dataset.parser,
+            lines: dataset.lineCount,
+          }));
+        const queryState = workspace.queryState;
+        setFiles(validDatasets);
+        setHistory(
+          Array.isArray(queryState?.history)
+            ? queryState.history.filter((entry): entry is string => typeof entry === "string").slice(0, 20)
+            : [],
+        );
+        setSaved(
+          Array.isArray(queryState?.saved)
+            ? queryState.saved.filter(
+                (entry): entry is { name: string; sql: string } =>
+                  typeof entry?.name === "string" && typeof entry.sql === "string",
+              )
+            : [],
+        );
+        setFilterPresets(
+          workspace.filterPresets.map((preset) => ({
+            name: preset.name,
+            filters: preset.filters,
+          })),
+        );
+        if (workspace.settings) {
+          setSql(typeof workspace.settings.sql === "string" ? workspace.settings.sql : QUERIES.count.sql);
+          if (["raw", "structured", "query", "analytics"].includes(workspace.settings.view))
+            setView(workspace.settings.view);
+          setRestoreQueryOutput(workspace.settings.view === "query");
+        }
+        setHydrated(true);
+        const preferredId = workspace.settings?.activeDatasetId;
+        const active =
+          validDatasets.find((dataset) => dataset.id === preferredId) ??
+          validDatasets[validDatasets.length - 1];
+        if (active) {
+          await activate(active, {
+            restoredFilters: workspace.filters[active.id] ?? { ...EMPTY_FILTERS },
+          });
+        }
+      })
+      .catch((cause) => {
+        if (!ignore) {
+          setPersistenceError(
+            cause instanceof Error ? cause.message : "Local persistence is unavailable.",
+          );
+          setHydrated(true);
+        }
+      });
+    return () => {
+      ignore = true;
+    };
+  }, [client]);
+  useEffect(() => {
+    if (!hydrated) return;
+    void saveQueryState(history, saved).catch((cause) => {
+      setPersistenceError(
+        cause instanceof Error ? cause.message : "Could not save query state.",
+      );
+    });
+  }, [hydrated, history, saved]);
+  useEffect(() => {
+    if (!hydrated) return;
+    const timer = setTimeout(() => {
+      void saveSettings({
+        activeDatasetId: activeId,
+        view,
+        sql,
+      }).catch((cause) => {
+        setPersistenceError(
+          cause instanceof Error ? cause.message : "Could not save settings.",
+        );
+      });
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [activeId, hydrated, sql, view]);
+  useEffect(() => {
+    if (!hydrated || !activeId) return;
+    const timer = setTimeout(() => {
+      void saveFilters(activeId, draftFilters).catch((cause) => {
+        setPersistenceError(
+          cause instanceof Error ? cause.message : "Could not save filters.",
+        );
+      });
+    }, 350);
+    return () => clearTimeout(timer);
+  }, [activeId, draftFilters, hydrated]);
   useEffect(() => {
     let ignore = false;
     if (log && selected !== null)
@@ -150,13 +286,15 @@ function App() {
     if (!incoming.length) return;
     const next = [...files];
     let target: ImportedFile | null = null;
+    let previousTarget: ImportedFile | undefined;
     for (const item of incoming) {
       const at = next.findIndex((entry) => entry.name === item.name);
+      if (at >= 0) previousTarget = next[at];
       target =
         at >= 0
-          ? { ...next[at], file: item }
+          ? { ...next[at], file: item, size: item.size, lines: null }
           : {
-              id: ++fileId.current,
+              id: createDatasetId(),
               file: item,
               name: item.name,
               size: item.size,
@@ -167,12 +305,42 @@ function App() {
       else next.push(target);
     }
     setFiles(next);
+    void Promise.all(
+      next
+        .filter((entry) => entry.id !== target?.id)
+        .map((entry, order) =>
+          saveDataset(
+            datasetRecord({
+              ...entry,
+              file: entry.file,
+              lineCount: entry.lines,
+              order,
+              lastOpenedAt: Date.now(),
+            }),
+          ),
+        ),
+    ).catch((cause) => {
+      setPersistenceError(
+        cause instanceof Error ? cause.message : "Could not save dataset.",
+      );
+    });
     // The file just handed over is the one the user asked for.
-    await activate(target as ImportedFile);
+    await activate(target as ImportedFile, {
+      order: next.findIndex((entry) => entry.id === target?.id),
+      rollbackEntry: previousTarget,
+    });
   }
 
-  async function activate(entry: ImportedFile) {
+  async function activate(
+    entry: ImportedFile,
+    options: {
+      restoredFilters?: Filters;
+      order?: number;
+      rollbackEntry?: ImportedFile;
+    } = {},
+  ) {
     if (entry.id === activeId && loadedFile.current === entry.file) return;
+    if (options.restoredFilters === undefined) setRestoreQueryOutput(false);
     const id = ++operation.current;
     setPending({ name: entry.name, size: entry.size });
     setProgress({ bytes: 0, lines: 0 });
@@ -192,6 +360,7 @@ function App() {
       setLoadedDetail(null);
       // Only a completed load may drop the previous dataset's view state.
       setFilterResult(null);
+      setDraftFilters(options.restoredFilters ?? { ...EMPTY_FILTERS });
       setSelected(null);
       setDetailsOpen(false);
       setFiles((current) =>
@@ -205,6 +374,20 @@ function App() {
       loadedFile.current = entry.file;
       setParser(entry.parser);
       setLog(summary);
+      await saveDataset(
+        datasetRecord({
+          ...entry,
+          file: entry.file,
+          lineCount: summary.lineCount,
+          order:
+            options.order ?? Math.max(0, files.findIndex((item) => item.id === entry.id)),
+          lastOpenedAt: Date.now(),
+        }),
+      ).catch((cause) => {
+        setPersistenceError(
+          cause instanceof Error ? cause.message : "Could not save dataset.",
+        );
+      });
       setNotice(
         `Imported ${summary.lineCount.toLocaleString()} lines. File stays in this browser tab.`,
       );
@@ -212,7 +395,11 @@ function App() {
       if (operation.current !== id) return;
       // A file that never parsed is not a dataset; keep entries that already loaded.
       setFiles((current) =>
-        current.filter((item) => item.id !== entry.id || item.lines !== null),
+        options.rollbackEntry
+          ? current.map((item) =>
+              item.id === entry.id ? options.rollbackEntry! : item,
+            )
+          : current.filter((item) => item.id !== entry.id || item.lines !== null),
       );
       if (cause instanceof Error && cause.name === "AbortError") {
         setNotice("Import cancelled. Previous file kept.");
@@ -237,6 +424,11 @@ function App() {
     const index = files.findIndex((item) => item.id === entry.id);
     const next = files.filter((item) => item.id !== entry.id);
     setFiles(next);
+    void deleteDataset(entry.id).catch((cause) => {
+      setPersistenceError(
+        cause instanceof Error ? cause.message : "Could not remove dataset.",
+      );
+    });
     if (entry.id !== activeId) return;
     if (!next.length) {
       clearAll();
@@ -255,8 +447,14 @@ function App() {
     setFiles([]);
     setActiveId(null);
     setFilterResult(null);
+    setDraftFilters({ ...EMPTY_FILTERS });
     setSelected(null);
     setDetailsOpen(false);
+    void clearDatasets().catch((cause) => {
+      setPersistenceError(
+        cause instanceof Error ? cause.message : "Could not clear datasets.",
+      );
+    });
     setNotice("Dataset cleared.");
   }
 
@@ -287,8 +485,32 @@ function App() {
         ),
       );
       setLog(summary);
+      setFilterResult(null);
+      setDraftFilters({ ...EMPTY_FILTERS });
       setSelected(null);
       setDetailsOpen(false);
+      const current = files.find((item) => item.id === activeId);
+      if (current)
+        void saveDataset(
+          datasetRecord({
+            ...current,
+            parser: nextParser,
+            file: current.file,
+            lineCount: summary.lineCount,
+            order: Math.max(0, files.findIndex((item) => item.id === current.id)),
+            lastOpenedAt: Date.now(),
+          }),
+        ).catch((cause) => {
+          setPersistenceError(
+            cause instanceof Error ? cause.message : "Could not save dataset.",
+          );
+        });
+      if (activeId)
+        void saveFilters(activeId, { ...EMPTY_FILTERS }).catch((cause) => {
+          setPersistenceError(
+            cause instanceof Error ? cause.message : "Could not save filters.",
+          );
+        });
       setNotice(
         `Parsed ${summary.total.toLocaleString()} records; ${summary.failed} failed.`,
       );
@@ -313,6 +535,36 @@ function App() {
     setSelected(index);
     setDetailsOpen(true);
     setCopied(false);
+  }
+
+  function applyChartPatch(patch: ChartFilterPatch) {
+    setDraftFilters(applyChartFilterPatch(appliedFilters, patch));
+    setView("structured");
+    setSelected(null);
+    setDetailsOpen(false);
+  }
+
+  function storeFilterPreset(name: string, filters: Filters) {
+    const preset = { name: name.trim(), filters };
+    if (!preset.name) return;
+    setFilterPresets((current) => [
+      ...current.filter((entry) => entry.name !== preset.name),
+      preset,
+    ]);
+    void saveFilterPreset(preset.name, preset.filters).catch((cause) => {
+      setPersistenceError(
+        cause instanceof Error ? cause.message : "Could not save filter preset.",
+      );
+    });
+  }
+
+  function removeFilterPreset(name: string) {
+    setFilterPresets((current) => current.filter((entry) => entry.name !== name));
+    void deleteFilterPreset(name).catch((cause) => {
+      setPersistenceError(
+        cause instanceof Error ? cause.message : "Could not remove filter preset.",
+      );
+    });
   }
   const raw = detail?.raw ?? "";
   const entry = detail?.entry ?? null;
@@ -379,7 +631,7 @@ function App() {
                     setNavOpen(false);
                     void activate(entry);
                   }}
-                  disabled={!!pending}
+                  disabled={!!pending || !hydrated}
                   aria-current={entry.id === activeId ? "true" : undefined}
                   className={`flex min-w-0 flex-1 items-center gap-2 rounded px-2 py-2 text-xs disabled:opacity-50 ${entry.id === activeId ? "bg-primary/10 text-primary" : "text-muted-foreground hover:bg-white/5"}`}
                 >
@@ -397,7 +649,7 @@ function App() {
                   variant="ghost"
                   size="icon"
                   aria-label={`Remove ${entry.name}`}
-                  disabled={!!pending}
+                   disabled={!!pending || !hydrated}
                   onClick={() => removeFile(entry)}
                   className="size-7 shrink-0 opacity-0 focus-visible:opacity-100 group-hover:opacity-100"
                 >
@@ -405,10 +657,10 @@ function App() {
                 </Button>
               </li>
             ))}
-          </ul>
-        ) : (
+           </ul>
+         ) : (
           <p className="px-2 py-4 text-xs text-muted-foreground">
-            No file imported yet
+             {hydrated ? "No file imported yet" : "Restoring local workspace…"}
           </p>
         )}
       </div>
@@ -594,7 +846,7 @@ function App() {
                   variant="outline"
                   className="text-[9px] text-muted-foreground"
                 >
-                  PHASE 05
+                   PHASE 08
                 </Badge>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
@@ -602,7 +854,7 @@ function App() {
               </p>
             </div>
             <Button
-              disabled={!!pending}
+               disabled={!!pending || !hydrated}
               onClick={() => picker.current?.click()}
               size="sm"
             >
@@ -688,6 +940,14 @@ function App() {
             </Button>
           </div>
         )}
+        {persistenceError && (
+          <p
+            role="status"
+            className="mx-4 mb-3 rounded border border-amber-400/25 bg-amber-400/10 px-4 py-2 text-xs text-amber-200 sm:mx-7"
+          >
+            Local persistence unavailable: {persistenceError}
+          </p>
+        )}
         <div aria-live="polite" className="sr-only">
           {notice}
         </div>
@@ -698,7 +958,7 @@ function App() {
               aria-label="Parser"
               className="max-w-52 rounded border bg-background p-2"
               value={parser}
-              disabled={!!pending}
+             disabled={!!pending || !hydrated}
               onChange={(event) => void reparse(event.target.value as ParserId)}
             >
               {PARSERS.map((option) => (
@@ -716,6 +976,7 @@ function App() {
                 aria-pressed={view === "raw"}
                 onClick={() => {
                   setView("raw");
+                  setRestoreQueryOutput(false);
                   setSelected(null);
                   setDetailsOpen(false);
                 }}
@@ -728,11 +989,39 @@ function App() {
                 aria-pressed={view === "structured"}
                 onClick={() => {
                   setView("structured");
+                  setRestoreQueryOutput(false);
                   setSelected(null);
                   setDetailsOpen(false);
                 }}
               >
                 Structured
+              </Button>
+              <Button
+                size="sm"
+                variant={view === "query" ? "secondary" : "ghost"}
+                aria-pressed={view === "query"}
+                onClick={() => {
+                  setView("query");
+                  setRestoreQueryOutput(false);
+                  setSelected(null);
+                  setDetailsOpen(false);
+                }}
+              >
+                Query
+              </Button>
+              <Button
+                size="sm"
+                variant={view === "analytics" ? "secondary" : "ghost"}
+                aria-pressed={view === "analytics"}
+                onClick={() => {
+                  setView("analytics");
+                  setRestoreQueryOutput(false);
+                  setSelected(null);
+                  setDetailsOpen(false);
+                }}
+              >
+                <BarChart3 size={13} />
+                Analytics
               </Button>
             </div>
           )}
@@ -790,21 +1079,19 @@ function App() {
             key={`filters-${log.revision}`}
             client={client}
             revision={log.revision}
-            disabled={!!pending}
+                 disabled={!!pending || !hydrated}
             hasTime={log.hasTime}
+            filters={draftFilters}
+            onFiltersChange={setDraftFilters}
+            presets={filterPresets}
+            onSavePreset={storeFilterPreset}
+            onLoadPreset={setDraftFilters}
+            onDeletePreset={removeFilterPreset}
             onChange={(result) => {
               setFilterResult(result);
               setSelected(null);
               setDetailsOpen(false);
             }}
-          />
-        )}
-        {log && (
-          <QueryPresets
-            key={log.revision}
-            client={client}
-            revision={log.revision}
-            disabled={!!pending}
           />
         )}
         {log && filterResult && (
@@ -832,7 +1119,7 @@ function App() {
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={!!pending}
+                 disabled={!!pending || !hydrated}
                 onClick={clearAll}
               >
                 <Trash2 size={13} />
@@ -852,10 +1139,48 @@ function App() {
               </div>
               <FileImport
                 onFiles={(files) => void importFiles(files)}
-                disabled={!!pending}
+                 disabled={!!pending || !hydrated}
               />
             </div>
-          ) : (
+          ) : view === "query" ? (
+            <Suspense
+              fallback={
+                <p className="p-4 text-xs text-muted-foreground">
+                  Loading query editor…
+                </p>
+              }
+            >
+              <QueryWorkspace
+                key={`query-${log.revision}`}
+                client={client}
+                summary={log}
+                sql={sql}
+                onSql={setSql}
+                history={history}
+                onHistory={setHistory}
+                 saved={saved}
+                 onSaved={setSaved}
+                 disabled={!!pending || !hydrated}
+                 autoRun={restoreQueryOutput}
+              />
+            </Suspense>
+           ) : view === "analytics" ? (
+             <Suspense
+               fallback={
+                 <p className="p-4 text-xs text-muted-foreground">
+                   Loading analytics…
+                 </p>
+               }
+             >
+               <AnalyticsDashboard
+                 key={`analytics-${log.revision}-${JSON.stringify(appliedFilters)}`}
+                 client={client}
+                 summary={log}
+                 filters={appliedFilters}
+                 onApplyFilter={applyChartPatch}
+               />
+             </Suspense>
+           ) : (
             <div className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">
                 {view === "structured" ? (

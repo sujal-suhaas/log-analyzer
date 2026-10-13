@@ -35,7 +35,7 @@ test("Phase 4: imported logs support count, timestamp order and level grouping",
   await expect(
     page.getByText("3 records · 1 failed · 0 skipped"),
   ).toBeVisible();
-  await page.getByText("SQL presets · DuckDB", { exact: true }).click();
+  await page.getByRole("button", { name: "Query", exact: true }).click();
   const results = page.getByRole("table", { name: "SQL results" });
   await page.getByRole("button", { name: "Count logs", exact: true }).click();
   await expect(
@@ -73,7 +73,7 @@ test("Phase 4: 100K SQL rows, reparse, replacement and empty dataset", async ({
   await expect(
     page.getByText("100,000 records · 0 failed · 0 skipped"),
   ).toBeVisible();
-  await page.getByText("SQL presets · DuckDB", { exact: true }).click();
+  await page.getByRole("button", { name: "Query", exact: true }).click();
   await page.getByRole("button", { name: "Count logs", exact: true }).click();
   await expect(
     results.getByRole("cell", { name: "100000", exact: true }),
@@ -85,6 +85,7 @@ test("Phase 4: 100K SQL rows, reparse, replacement and empty dataset", async ({
     mimeType: "text/plain",
     buffer: Buffer.from("level,message\nWARN,hello\n"),
   });
+  await page.getByRole("button", { name: "Structured", exact: true }).click();
   await expect(
     page.getByText("2 records · 2 failed · 0 skipped"),
   ).toBeVisible();
@@ -92,7 +93,7 @@ test("Phase 4: 100K SQL rows, reparse, replacement and empty dataset", async ({
   await expect(
     page.getByText("1 records · 0 failed · 1 skipped"),
   ).toBeVisible();
-  await page.getByText("SQL presets · DuckDB", { exact: true }).click();
+  await page.getByRole("button", { name: "Query", exact: true }).click();
   await page.getByRole("button", { name: "Count logs", exact: true }).click();
   await expect(
     results.getByRole("cell", { name: "1", exact: true }),
@@ -106,10 +107,11 @@ test("Phase 4: 100K SQL rows, reparse, replacement and empty dataset", async ({
     mimeType: "text/plain",
     buffer: Buffer.from(""),
   });
+  await page.getByRole("button", { name: "Structured", exact: true }).click();
   await expect(
     page.getByText("0 records · 0 failed · 0 skipped"),
   ).toBeVisible();
-  await page.getByText("SQL presets · DuckDB", { exact: true }).click();
+  await page.getByRole("button", { name: "Query", exact: true }).click();
   await page.getByRole("button", { name: "Count logs", exact: true }).click();
   await expect(
     results.getByRole("cell", { name: "0", exact: true }),

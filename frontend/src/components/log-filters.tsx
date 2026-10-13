@@ -4,26 +4,47 @@ import {
   EMPTY_FILTERS,
   filterWhere,
   type Filters,
+  type FilterPreset,
   type FilterSummary,
 } from "@/lib/filters";
 import type { LogWorkerClient } from "@/lib/worker/log-client";
+
+function localDateTimeValue(value: string) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  const pad = (number: number) => String(number).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
 
 export function LogFilters({
   client,
   revision,
   disabled,
   hasTime,
+  filters,
+  onFiltersChange,
+  presets,
+  onSavePreset,
+  onLoadPreset,
+  onDeletePreset,
   onChange,
 }: {
   client: LogWorkerClient;
   revision: number;
   disabled: boolean;
   hasTime: boolean;
+  filters: Filters;
+  onFiltersChange: (filters: Filters) => void;
+  presets: FilterPreset[];
+  onSavePreset: (name: string, filters: Filters) => void;
+  onLoadPreset: (filters: Filters) => void;
+  onDeletePreset: (name: string) => void;
   onChange: (result: FilterSummary | null) => void;
 }) {
-  const [draft, setDraft] = useState<Filters>(EMPTY_FILTERS);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [presetName, setPresetName] = useState("");
   const generation = useRef(0);
   // Hold the latest callback in a ref: parent re-renders must not restart the debounce
   // (an inline onChange prop changes identity every render and would re-query forever).
@@ -38,13 +59,13 @@ export function LogFilters({
     const timer = setTimeout(async () => {
       try {
         setError("");
-        if (!filterWhere(draft).active) {
+        if (!filterWhere(filters).active) {
           setBusy(false);
           onChangeRef.current(null);
           return;
         }
         setBusy(true);
-        const result = await client.filter(revision, draft);
+        const result = await client.filter(revision, filters);
         if (active && generation.current === id) onChangeRef.current(result);
       } catch (cause) {
         if (active && generation.current === id)
@@ -57,9 +78,9 @@ export function LogFilters({
       active = false;
       clearTimeout(timer);
     };
-  }, [client, revision, disabled, draft]);
+  }, [client, revision, disabled, filters]);
   const field = (key: keyof Filters, value: string | boolean) =>
-    setDraft((current) => ({ ...current, [key]: value }));
+    onFiltersChange({ ...filters, [key]: value });
   const inputClass = "min-w-0 rounded border bg-background px-2 py-1.5 text-xs";
   return (
     <fieldset
@@ -73,7 +94,7 @@ export function LogFilters({
           aria-label="Search logs"
           placeholder="Search message or raw text…"
           maxLength={1000}
-          value={draft.text}
+          value={filters.text}
           onChange={(e) => field("text", e.target.value)}
           className={`${inputClass} w-60 flex-1`}
         />
@@ -81,7 +102,7 @@ export function LogFilters({
           <input
             type="checkbox"
             aria-label="Regex search"
-            checked={draft.regex}
+            checked={filters.regex}
             onChange={(e) => field("regex", e.target.checked)}
           />
           Regex (RE2)
@@ -91,7 +112,7 @@ export function LogFilters({
           variant="outline"
           onClick={() => {
             generation.current++;
-            setDraft({ ...EMPTY_FILTERS });
+            onFiltersChange({ ...EMPTY_FILTERS });
             setBusy(false);
             setError("");
             onChangeRef.current(null);
@@ -114,7 +135,7 @@ export function LogFilters({
               <input
                 aria-label={`Filter ${key}`}
                 maxLength={1000}
-                value={draft[key]}
+                value={filters[key]}
                 onChange={(e) => field(key, e.target.value)}
                 className={inputClass}
                 placeholder="Exact value"
@@ -137,7 +158,7 @@ export function LogFilters({
                 min={min}
                 max={max}
                 aria-label={label}
-                value={draft[key]}
+                value={filters[key]}
                 onChange={(e) => field(key, e.target.value)}
                 className={inputClass}
               />
@@ -148,7 +169,7 @@ export function LogFilters({
             <select
               aria-label="Time range"
               disabled={!hasTime}
-              value={draft.time}
+              value={filters.time}
               onChange={(e) => field("time", e.target.value)}
               className={inputClass}
             >
@@ -159,14 +180,15 @@ export function LogFilters({
               <option value="custom">Custom (local time)</option>
             </select>
           </label>
-          {draft.time === "custom" &&
+          {filters.time === "custom" &&
             (["from", "to"] as const).map((key) => (
               <label key={key} className="grid gap-1 text-xs">
                 {key}
-                <input
-                  type="datetime-local"
-                  step="1"
-                  aria-label={`Time ${key}`}
+                  <input
+                    type="datetime-local"
+                    step="1"
+                    aria-label={`Time ${key}`}
+                    value={localDateTimeValue(filters[key])}
                   className={inputClass}
                   onChange={(e) => {
                     const value = e.target.value;
@@ -182,6 +204,49 @@ export function LogFilters({
           lookaround/backreferences. Highlights: first 2K characters.
         </p>
       </details>
+      <section aria-label="Filter presets" className="rounded border p-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            aria-label="Filter preset name"
+            maxLength={100}
+            value={presetName}
+            onChange={(event) => setPresetName(event.target.value)}
+            className={`${inputClass} w-44`}
+            placeholder="Name this filter"
+          />
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!presetName.trim()}
+            onClick={() => {
+              onSavePreset(presetName, filters);
+              setPresetName("");
+            }}
+          >
+            Save filter
+          </Button>
+          {presets.map((preset) => (
+            <span key={preset.name} className="flex items-center gap-1">
+              <Button
+                size="sm"
+                variant="ghost"
+                title={preset.name}
+                onClick={() => onLoadPreset(preset.filters)}
+              >
+                {preset.name}
+              </Button>
+              <Button
+                size="sm"
+                variant="ghost"
+                aria-label={`Remove filter preset ${preset.name}`}
+                onClick={() => onDeletePreset(preset.name)}
+              >
+                ×
+              </Button>
+            </span>
+          ))}
+        </div>
+      </section>
       {error && (
         <p role="alert" className="text-xs text-red-300">
           {error} Previous results kept.
