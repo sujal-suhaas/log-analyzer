@@ -10,6 +10,7 @@ import {
 } from "recharts";
 import type { ChartFilterPatch, Filters } from "@/lib/filters";
 import type { LogWorkerClient } from "@/lib/worker/log-client";
+import { Button } from "./ui/button";
 import type {
   AnalyticsCountPoint,
   AnalyticsMessagePoint,
@@ -81,7 +82,7 @@ function TimeChart({
                 <CartesianGrid stroke="var(--border)" strokeDasharray="3 3" />
                 <XAxis dataKey="label" tick={{ fontSize: 10 }} />
                 <YAxis allowDecimals={false} tick={{ fontSize: 10 }} />
-                <Tooltip />
+                <Tooltip contentStyle={{ backgroundColor: "var(--popover)", color: "var(--popover-foreground)", borderColor: "var(--border)" }} />
                 <Line
                   type="monotone"
                   dataKey={metric}
@@ -292,6 +293,7 @@ export default function AnalyticsDashboard({
   const [snapshot, setSnapshot] = useState<AnalyticsSnapshot | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState("");
+  const [attempt, setAttempt] = useState(0);
 
   useEffect(() => {
     let active = true;
@@ -314,7 +316,7 @@ export default function AnalyticsDashboard({
     return () => {
       active = false;
     };
-  }, [client, summary.revision, filters]);
+  }, [client, summary.revision, filters, attempt]);
 
   return (
     <div
@@ -328,8 +330,9 @@ export default function AnalyticsDashboard({
         </p>
       )}
       {error && (
-        <div role="alert" aria-label="Analytics query error" className="mb-3 rounded border border-red-400/25 bg-red-400/10 p-3 text-xs text-red-300">
+        <div role="alert" aria-label="Analytics query error" className="mb-3 rounded border border-destructive/30 bg-destructive/10 p-3 text-xs text-destructive">
           {error}
+          <Button size="sm" variant="outline" className="ml-2" onClick={() => setAttempt((value) => value + 1)}>Retry analytics</Button>
         </div>
       )}
       {snapshot && (

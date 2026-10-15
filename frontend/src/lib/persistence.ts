@@ -1,5 +1,6 @@
 import type { Filters } from "./filters";
 import type { ParserId } from "./parsers/types";
+import type { ThemePreference } from "./theme";
 
 const DATABASE_NAME = "logline-local";
 const DATABASE_VERSION = 2;
@@ -34,6 +35,7 @@ export type PersistedSettings = {
   activeDatasetId: string | null;
   view: "raw" | "structured" | "query" | "analytics";
   sql: string;
+  theme?: ThemePreference;
 };
 
 export type PersistedFilterPreset = {

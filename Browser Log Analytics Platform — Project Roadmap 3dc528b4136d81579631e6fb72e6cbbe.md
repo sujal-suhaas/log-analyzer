@@ -262,29 +262,58 @@ Dataset still available
 
 ## Phase 9 — Export + Download
 
-- [ ]  **Phase 9 complete**
-- [ ]  Export filtered logs as CSV.
-- [ ]  Export results as JSON/JSONL.
-- [ ]  Download the original uploaded file.
-- [ ]  Generate large exports from the Worker/database layer instead of normal React state.
+- [x]  **Phase 9 complete**
+- [x]  Export filtered logs as CSV.
+- [x]  Export results as JSON/JSONL.
+- [x]  Download the original uploaded file.
+- [x]  Generate large exports from the Worker/database layer instead of normal React state.
+
+> Implementation note: filtered records and last-run SQL results export as CSV,
+> JSON or JSONL from Arrow batches in the existing Worker. Query exports rerun
+> the exact successful SQL without the preview cap; positional JSON/JSONL rows
+> retain duplicate columns. Original downloads preserve the File bytes, also
+> after reload. Invalid drafts and stale operations cannot silently export a
+> different scope. The final Blob still scales with output size; disk-streaming
+> and export cancellation remain later work. Phase 9 verification: 35 unit tests
+> and 23 browser tests; Phase 10 extends this coverage below.
 
 ## Phase 10 — Performance + Polish
 
-- [ ]  **Phase 10 complete**
-- [ ]  Loading/progress states.
-- [ ]  Query cancellation.
-- [ ]  Debounced search.
-- [ ]  Empty/error states.
-- [ ]  Column show/hide.
-- [ ]  Resizable columns.
-- [ ]  Dark mode.
-- [ ]  Keyboard shortcuts.
-- [ ]  Copy field/value buttons.
-- [ ]  Log detail drawer with raw JSON.
-- [ ]  Memory/large-file warning.
-- [ ]  Test with 10K records.
-- [ ]  Test with 100K records.
-- [ ]  Test with 1M+ records.
+- [x]  **Phase 10 complete**
+- [x]  Loading/progress states.
+- [x]  Query cancellation.
+- [x]  Debounced search.
+- [x]  Empty/error states.
+- [x]  Column show/hide.
+- [x]  Resizable columns.
+- [x]  Dark mode.
+- [x]  Keyboard shortcuts.
+- [x]  Copy field/value buttons.
+- [x]  Log detail drawer with raw JSON.
+- [x]  Memory/large-file warning.
+- [x]  Test with 10K records.
+- [x]  Test with 100K records.
+- [x]  Test with 1M+ records.
+
+> Implementation note: query cancellation targets a request and preserves the
+> dataset, with cooperative engine interruption and serialized rollback/reader
+> cleanup. Structured/SQL tables support accessible visibility/resize controls;
+> Dark/Light/System persists locally. Detail copy retains full values/raw/JSON,
+> while large previews are bounded. Loading/empty/error/retry states, shortcuts,
+> 250-ms search debounce and memory warnings are in place. SQL text and read-only
+> policy are unchanged; preview conversion retains at most 5,000 rows.
+>
+> Scale verification successfully imported and queried 10,000, 100,000 and
+> **1,100,000 JSONL records**, including exact aggregates, first/middle/last
+> inspection, global keyboard navigation and sparse filtered source mapping.
+> Above 500K displayed rows, 250K-row segments avoid browser pixel-height limits;
+> Worker windows stay capped at 256 rows. The 50-MiB input cap remains; the new
+> 1,250,000-physical-source-line ceiling counts blanks and CSV headers. Over-cap
+> JSONL/CSV failures preserve the prior dataset. Peak process memory is not
+> bounded by input size; OPFS/disk streaming and export cancellation remain later
+> work. Verified: **39 unit tests, 44 Chromium browser tests**, production build
+> and typecheck passed; lint has nine warnings, no errors. README records the
+> reproducible workload, latest timings and remaining limitations.
 
 # 5. Backend Scope
 

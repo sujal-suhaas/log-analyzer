@@ -1,7 +1,8 @@
-import { useCallback, useRef } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback } from "react";
 import { HighlightText } from "@/components/highlight";
+import { RowWindowStatus, SegmentedRowControls } from "@/components/segmented-row-controls";
 import { useWindow } from "@/lib/use-window";
+import { useSegmentedRows } from "@/lib/use-segmented-rows";
 import type { LogWorkerClient } from "@/lib/worker/log-client";
 
 export function LogTable({
@@ -19,30 +20,26 @@ export function LogTable({
   selected: number | null;
   onSelect: (index: number) => void;
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const virtual = useVirtualizer({
-    count: lineCount,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 32,
-    overscan: 10,
-  });
-  const range = virtual.getVirtualItems();
-  const from = range[0]?.index ?? 0;
-  const to = range[range.length - 1]?.index ?? -1;
+  const rows = useSegmentedRows(lineCount, 32, 10);
+  const { scrollRef, range } = rows;
+  const from = range[0]?.index ?? rows.offset;
+  const to = range[range.length - 1]?.index ?? rows.offset - 1;
   const fetcher = useCallback(
     (start: number, count: number) =>
       client.rawRows(revision, start, count, filterId),
     [client, revision, filterId],
   );
-  const { lookup, error } = useWindow(fetcher, lineCount, from, to);
-  const active = selected ?? 0;
+  const window = useWindow(fetcher, lineCount, from, to);
+  const { lookup } = window;
+  const waiting = range.some((row) => !lookup(row.index));
+  const active = Math.max(0, Math.min(selected ?? rows.offset, lineCount - 1));
+  function navigate(row: number) {
+    rows.scrollToRow(row);
+    onSelect(row);
+  }
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      {error && (
-        <p role="alert" className="p-3 text-xs text-red-300">
-          {error}
-        </p>
-      )}
+      <RowWindowStatus state={window} waiting={waiting} />
       <div className="flex h-10 shrink-0 items-center border-b bg-white/[.015] font-mono text-[10px] tracking-wider text-muted-foreground">
         <span className="w-20 shrink-0 text-center">LINE</span>
         <span>RAW CONTENT</span>
@@ -52,6 +49,7 @@ export function LogTable({
         ref={scrollRef}
         role="listbox"
         aria-label="Raw log lines"
+        aria-busy={waiting && !window.error}
         aria-activedescendant={
           range.some((row) => row.index === active)
             ? `log-line-${active}`
@@ -60,6 +58,7 @@ export function LogTable({
         tabIndex={0}
         className="min-h-0 flex-1 overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-primary"
         onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return;
           const next =
             e.key === "ArrowDown"
               ? Math.min(active + 1, lineCount - 1)
@@ -70,10 +69,9 @@ export function LogTable({
                   : e.key === "End"
                     ? lineCount - 1
                     : null;
-          if (next !== null && next >= 0) {
+          if (next !== null && next >= 0 && next < lineCount) {
             e.preventDefault();
-            virtual.scrollToIndex(next);
-            onSelect(lookup(next)?.row ?? next);
+            navigate(next);
           }
           if (e.key === "Enter" && lineCount) {
             e.preventDefault();
@@ -82,8 +80,9 @@ export function LogTable({
         }}
       >
         <div
+          data-row-spacer
           style={{
-            height: virtual.getTotalSize(),
+            height: rows.height,
             position: "relative",
             minWidth: "100%",
           }}
@@ -96,9 +95,11 @@ export function LogTable({
                 id={`log-line-${row.index}`}
                 key={row.key}
                 role="option"
-                aria-selected={selected === (entry?.row ?? row.index)}
-                onClick={() => onSelect(entry?.row ?? row.index)}
-                className={`absolute left-0 top-0 flex w-max min-w-full cursor-pointer items-center border-b border-white/[.025] font-mono text-xs hover:bg-white/[.035] ${selected === (entry?.row ?? row.index) ? "bg-primary/10 text-primary" : "text-zinc-400"}`}
+                aria-posinset={row.index + 1}
+                aria-setsize={lineCount}
+                aria-selected={selected === row.index}
+                onClick={() => onSelect(row.index)}
+                className={`absolute left-0 top-0 flex w-max min-w-full cursor-pointer items-center border-b border-border/60 font-mono text-xs hover:bg-muted/40 ${selected === row.index ? "bg-primary/10 text-primary" : "text-muted-foreground"}`}
                 style={{
                   height: row.size,
                   transform: `translateY(${row.start}px)`,
@@ -110,7 +111,7 @@ export function LogTable({
                 {/* ponytail: preview capped at 2K chars; full line remains in detail panel. */}
                 <span className="whitespace-pre pr-8">
                   <HighlightText
-                    text={raw.slice(0, 2000) || " "}
+                    text={entry ? raw.slice(0, 2000) || " " : "Loading…"}
                     ranges={entry?.highlights}
                   />
                   {raw.length > 2000 ? " … [open full line]" : ""}
@@ -119,7 +120,9 @@ export function LogTable({
             );
           })}
         </div>
+        {lineCount === 0 && <p role="status" className="p-6 text-sm text-muted-foreground">{filterId === undefined ? "This file has no log lines." : "No matching lines."}</p>}
       </div>
+      <SegmentedRowControls rows={rows} onNavigate={navigate} />
       <div className="flex h-9 shrink-0 items-center justify-between border-t px-4 text-[11px] text-muted-foreground">
         <span>{lineCount.toLocaleString()} lines · Virtual scrolling</span>
         <span>↑ ↓ navigate · Enter inspect</span>

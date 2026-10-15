@@ -6,8 +6,11 @@ import {
   useRef,
   useState,
 } from "react";
-import { Check, Eraser, Play, Save, WandSparkles, X } from "lucide-react";
+import { Check, Eraser, Play, Save, Square, WandSparkles, X } from "lucide-react";
 import { Button } from "./ui/button";
+import { ExportControls } from "./export-controls";
+import { TableColumnControls, TableColumnResizeHandle } from "./table-column-controls";
+import { useTableColumns } from "@/lib/use-table-columns";
 import {
   LOG_COLUMNS,
   QUERIES,
@@ -32,6 +35,7 @@ export default function QueryWorkspace({
   onSaved,
   disabled,
   autoRun,
+  dark,
 }: {
   client: LogWorkerClient;
   summary: LogSummary;
@@ -43,51 +47,75 @@ export default function QueryWorkspace({
   onSaved: (saved: { name: string; sql: string }[]) => void;
   disabled: boolean;
   autoRun?: boolean;
+  dark: boolean;
 }) {
   const [result, setResult] = useState<QueryResult | null>(null);
+  const [executedSql, setExecutedSql] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [name, setName] = useState("");
+  const [cancelled, setCancelled] = useState(false);
+  const layout = useTableColumns((result?.columns ?? []).map((column, index) => ({
+    id: `${index}:${column}`, label: column, index, defaultWidth: 220,
+  })));
   const generation = useRef(0);
+  const running = useRef(false);
+  const activeQuery = useRef({ running: false });
   useEffect(
-    () => () => {
-      generation.current++;
+    () => {
+      const operation = activeQuery.current;
+      return () => {
+        generation.current++;
+        if (operation.running) void client.cancelQuery().catch(() => {});
+      };
     },
-    [],
+    [client],
   );
 
   const run = useCallback(async (text: string, recordHistory = true) => {
+    if (disabled || running.current || !text.trim()) return;
+    running.current = true;
+    activeQuery.current.running = true;
     const id = ++generation.current;
     setBusy(true);
     setResult(null);
     setError("");
+    setCancelled(false);
     try {
       const value = await client.query(summary.revision, text);
       if (generation.current !== id) return;
       setResult(value);
+      setExecutedSql(text);
       if (recordHistory)
         onHistory(
           [text, ...history.filter((entry) => entry !== text)].slice(0, 20),
         );
     } catch (cause) {
-      if (generation.current === id)
-        setError(cause instanceof Error ? cause.message : "Query failed.");
+      if (generation.current === id) {
+        if (cause instanceof Error && cause.name === "AbortError") setCancelled(true);
+        else setError(cause instanceof Error ? cause.message : "Query failed.");
+      }
     } finally {
-      if (generation.current === id) setBusy(false);
+      if (generation.current === id) {
+        running.current = false;
+        activeQuery.current.running = false;
+        setBusy(false);
+      }
     }
-  }, [client, history, onHistory, summary.revision]);
+  }, [client, disabled, history, onHistory, summary.revision]);
 
   const autoRunRevision = useRef<number | null>(null);
   useEffect(() => {
     if (
       !autoRun ||
+      disabled ||
       !sql.trim() ||
       autoRunRevision.current === summary.revision
     )
       return;
     autoRunRevision.current = summary.revision;
     void run(sql, false);
-  }, [autoRun, run, sql, summary.revision]);
+  }, [autoRun, disabled, run, sql, summary.revision]);
 
   function pretty() {
     try {
@@ -103,13 +131,15 @@ export default function QueryWorkspace({
   }
 
   function clear() {
-    // A query cannot be cancelled yet, but its eventual response must not
-    // resurrect results after the user explicitly cleared the workspace.
+    if (running.current) void client.cancelQuery().catch(() => {});
     generation.current++;
+    running.current = false;
+    activeQuery.current.running = false;
     setBusy(false);
     onSql("");
     setResult(null);
     setError("");
+    setCancelled(false);
   }
 
   return (
@@ -123,6 +153,11 @@ export default function QueryWorkspace({
           <Play size={13} />
           Run query
         </Button>
+        {busy && (
+          <Button size="sm" variant="outline" onClick={() => void client.cancelQuery().catch((cause) => setError(cause instanceof Error ? cause.message : "Could not cancel query."))}>
+            <Square size={13} /> Cancel query
+          </Button>
+        )}
         <Button size="sm" variant="outline" onClick={pretty}>
           <WandSparkles size={13} />
           Format
@@ -150,6 +185,12 @@ export default function QueryWorkspace({
               className="h-full w-full resize-none bg-transparent p-3 font-mono text-xs outline-none"
               value={sql}
               onChange={(event) => onSql(event.target.value)}
+              onKeyDown={(event) => {
+                if ((event.ctrlKey || event.metaKey) && event.key === "Enter" && !event.nativeEvent.isComposing) {
+                  event.preventDefault();
+                  void run(sql);
+                }
+              }}
             />
           }
         >
@@ -158,6 +199,7 @@ export default function QueryWorkspace({
             columns={LOG_COLUMNS}
             onChange={onSql}
             onRun={() => void run(sql)}
+            dark={dark}
           />
         </Suspense>
       </div>
@@ -184,10 +226,11 @@ export default function QueryWorkspace({
         </p>
       )}
       {error && (
-        <p role="alert" className="text-xs text-red-300">
+        <p role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}
+      {cancelled && <p role="status" className="text-xs text-muted-foreground">Query cancelled. Dataset kept; you can run another query.</p>}
       {result && (
         <>
           <p role="status" className="text-xs text-muted-foreground">
@@ -195,23 +238,43 @@ export default function QueryWorkspace({
             {result.truncated > 0 && `${result.rows.length.toLocaleString()} shown · `}
             {result.elapsedMs.toFixed(1)} ms SQL execution (excludes loading)
           </p>
+          <ExportControls
+            key={`query-export-${summary.revision}-${executedSql}`}
+            kind="query"
+            disabled={disabled || busy || sql !== executedSql}
+            onExport={(format) => client.exportQuery(summary.revision, format)}
+          />
+          <p className="text-[10px] text-muted-foreground">
+            Export re-runs the last successful SQL in the Worker without the preview cap.
+            {sql !== executedSql && " Run the edited query before exporting."}
+          </p>
           {result.truncated > 0 && (
-            <p className="text-[10px] text-amber-300">
+            <p className="text-[10px] text-amber-800 dark:text-amber-300">
               Showing {SQL_LIMIT.toLocaleString()} of{" "}
               {(result.rows.length + result.truncated).toLocaleString()} rows.
-              Add a LIMIT or aggregate in SQL to see the rest.
+              Export query results to download every returned row.
             </p>
           )}
+          <TableColumnControls
+            columns={layout.columns}
+            onVisibilityChange={layout.setVisible}
+            onWidthChange={layout.setWidth}
+            onReset={layout.reset}
+          />
+          {layout.visibleColumns.length === 0 && <p role="status" className="text-xs text-muted-foreground">All result columns are hidden. Use Columns to show them or Reset columns.</p>}
           <div className="h-48 min-h-24 max-h-[40vh] shrink-0 overflow-auto rounded-lg border">
             <table
               aria-label="SQL results"
-              className="w-full text-left font-mono text-xs"
+              className="min-w-full table-fixed text-left font-mono text-xs"
+              style={{ width: layout.totalWidth }}
             >
+              <colgroup>{layout.visibleColumns.map((column) => <col key={column.id} style={{ width: column.width }} />)}</colgroup>
               <thead className="sticky top-0 bg-card">
                 <tr>
-                  {result.columns.map((column) => (
-                    <th key={column} className="border-b p-2">
-                      {column}
+                  {layout.visibleColumns.map((column) => (
+                    <th key={column.id} aria-label={column.label} className="relative truncate border-b p-2">
+                      {column.label}
+                      <TableColumnResizeHandle column={column} onWidthChange={layout.setWidth} />
                     </th>
                   ))}
                 </tr>
@@ -219,19 +282,20 @@ export default function QueryWorkspace({
               <tbody>
                 {result.rows.map((row, index) => (
                   <tr key={index}>
-                    {row.map((value, cell) => (
+                    {layout.visibleColumns.map((column) => (
                       <td
-                        key={cell}
+                        key={column.id}
                         className="max-w-80 truncate border-b p-2"
-                        title={value}
+                        title={row[column.index]}
                       >
-                        {value}
+                        {row[column.index]}
                       </td>
                     ))}
                   </tr>
                 ))}
               </tbody>
             </table>
+            {result.rows.length === 0 && <p role="status" className="p-4 text-xs text-muted-foreground">No rows returned.</p>}
           </div>
         </>
       )}

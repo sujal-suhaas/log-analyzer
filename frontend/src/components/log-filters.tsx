@@ -248,7 +248,7 @@ export function LogFilters({
         </div>
       </section>
       {error && (
-        <p role="alert" className="text-xs text-red-300">
+        <p role="alert" className="text-xs text-destructive">
           {error} Previous results kept.
         </p>
       )}

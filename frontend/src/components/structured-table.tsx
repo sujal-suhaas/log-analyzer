@@ -1,7 +1,11 @@
-import { useCallback, useRef } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useCallback } from "react";
 import { HighlightText } from "@/components/highlight";
+import { TableColumnControls, TableColumnResizeHandle } from "@/components/table-column-controls";
+import { Button } from "@/components/ui/button";
+import { RowWindowStatus, SegmentedRowControls } from "@/components/segmented-row-controls";
 import { useWindow } from "@/lib/use-window";
+import { useSegmentedRows } from "@/lib/use-segmented-rows";
+import { useTableColumns } from "@/lib/use-table-columns";
 import { CORE_FIELDS, displayValue } from "@/lib/parsers/types";
 import type { LogSummary } from "@/lib/worker/messages";
 import type { LogWorkerClient } from "@/lib/worker/log-client";
@@ -21,39 +25,62 @@ export function StructuredTable({
   selected: number | null;
   onSelect: (row: number) => void;
 }) {
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const virtual = useVirtualizer({
-    count: summary.total,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => 34,
-    overscan: 8,
-  });
-  const range = virtual.getVirtualItems();
-  const from = range[0]?.index ?? 0;
-  const to = range[range.length - 1]?.index ?? -1;
+  const viewTotal = total ?? summary.total;
+  const rows = useSegmentedRows(viewTotal, 34, 8);
+  const { scrollRef, range } = rows;
+  const from = range[0]?.index ?? rows.offset;
+  const to = range[range.length - 1]?.index ?? rows.offset - 1;
   const fetcher = useCallback(
     (start: number, count: number) =>
       client.records(summary.revision, start, count, filterId),
     [client, summary.revision, filterId],
   );
-  const viewTotal = total ?? summary.total;
-  const { lookup, error } = useWindow(fetcher, viewTotal, from, to);
-  const active = Math.max(0, selected ?? 0);
-  const columns = [...CORE_FIELDS, ...summary.extras];
-  const template = `80px ${columns.map((key) => (key === "message" ? "360px" : key === "timestamp" ? "220px" : "160px")).join(" ")}`;
+  const window = useWindow(fetcher, viewTotal, from, to);
+  const { lookup } = window;
+  const waiting = range.some((row) => !lookup(row.index));
+  const active = Math.max(0, Math.min(selected ?? rows.offset, viewTotal - 1));
+  function navigate(row: number) {
+    rows.scrollToRow(row);
+    onSelect(row);
+  }
+  const layout = useTableColumns([
+    {
+      id: "source-line", label: "LINE", field: null as string | null,
+      defaultWidth: 80, minWidth: 64, maxWidth: 240, hideable: false,
+    },
+    ...[...CORE_FIELDS, ...summary.extras].map((field) => ({
+      id: `field:${field}`, label: field, field,
+      defaultWidth: field === "message" ? 360 : field === "timestamp" ? 220 : 160,
+    })),
+  ], "logline:structured-columns");
+  const columns = layout.visibleColumns.filter(
+    (column): column is typeof column & { field: string } => column.field !== null,
+  );
+  const template = layout.template;
   return (
-    <div className="flex min-h-0 flex-1 flex-col">
-      {error && (
-        <p role="alert" className="p-3 text-xs text-red-300">
-          {error}
-        </p>
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+      <TableColumnControls
+        columns={layout.columns}
+        onVisibilityChange={layout.setVisible}
+        onWidthChange={layout.setWidth}
+        onReset={layout.reset}
+      />
+      {!columns.length && (
+        <div role="status" className="flex shrink-0 flex-wrap items-center gap-2 border-b px-4 py-2 text-xs text-muted-foreground">
+          All log fields are hidden. Source lines and row details are still available.
+          <Button type="button" size="sm" variant="outline" onClick={layout.reset}>
+            Reset columns
+          </Button>
+        </div>
       )}
+      <RowWindowStatus state={window} waiting={waiting} />
       <div
         ref={scrollRef}
         role="grid"
         aria-label="Structured logs"
         aria-rowcount={viewTotal + 1}
-        aria-colcount={columns.length + 1}
+        aria-colcount={layout.visibleColumns.length}
+        aria-busy={waiting && !window.error}
         tabIndex={0}
         aria-activedescendant={
           range.some((row) => row.index === active)
@@ -62,6 +89,7 @@ export function StructuredTable({
         }
         className="min-h-0 flex-1 overflow-auto outline-none focus-visible:ring-1 focus-visible:ring-primary"
         onKeyDown={(event) => {
+          if (event.target !== event.currentTarget) return;
           const next =
             event.key === "ArrowDown"
               ? Math.min(active + 1, viewTotal - 1)
@@ -76,33 +104,31 @@ export function StructuredTable({
                       : null;
           if (next !== null && next >= 0 && next < viewTotal) {
             event.preventDefault();
-            virtual.scrollToIndex(next);
-            onSelect(next);
+            navigate(next);
           }
         }}
       >
-        <div className="w-max min-w-full">
+        <div className="min-w-full" style={{ width: layout.totalWidth }}>
           <div
             role="row"
             aria-rowindex={1}
             className="sticky top-0 z-10 grid h-10 items-center border-b bg-background text-[10px] text-muted-foreground"
             style={{ gridTemplateColumns: template }}
           >
-            <span role="columnheader" className="px-3">
-              LINE
-            </span>
-            {columns.map((key) => (
-              <span
+            {layout.visibleColumns.map((column) => (
+              <div
                 role="columnheader"
-                key={key}
-                className="truncate px-3"
-                title={key}
+                aria-label={column.label}
+                key={column.id}
+                className={`flex h-full min-w-0 items-center ${column.field === null ? "sticky left-0 z-20 bg-background" : "relative"}`}
+                title={column.label}
               >
-                {key}
-              </span>
+                <span className="truncate px-3">{column.label}</span>
+                <TableColumnResizeHandle column={column} onWidthChange={layout.setWidth} />
+              </div>
             ))}
           </div>
-          <div style={{ height: virtual.getTotalSize(), position: "relative" }}>
+          <div data-row-spacer style={{ height: rows.height, position: "relative" }}>
             {range.map((item) => {
               const entry = lookup(item.index);
               return entry ? (
@@ -113,7 +139,7 @@ export function StructuredTable({
                   aria-rowindex={item.index + 2}
                   aria-selected={item.index === selected}
                   onClick={() => onSelect(item.index)}
-                  className={`absolute left-0 top-0 grid cursor-pointer items-center border-b border-white/5 font-mono text-xs hover:bg-white/5 ${entry.failed ? "bg-red-400/5" : ""} ${item.index === selected ? "bg-primary/10" : ""}`}
+                  className={`absolute left-0 top-0 grid w-full cursor-pointer items-center border-b border-white/5 font-mono text-xs hover:bg-white/5 ${entry.failed ? "bg-red-400/5" : ""} ${item.index === selected ? "bg-primary/10" : ""}`}
                   style={{
                     gridTemplateColumns: template,
                     height: item.size,
@@ -122,7 +148,7 @@ export function StructuredTable({
                 >
                   <span
                     role="gridcell"
-                    className="sticky left-0 bg-background px-3 text-muted-foreground"
+                    className="sticky left-0 z-10 truncate bg-background px-3 text-muted-foreground"
                   >
                     {entry.row + 1}
                     {filterId !== undefined && !entry.failed && (
@@ -136,7 +162,7 @@ export function StructuredTable({
                     )}
                     {entry.failed && (
                       <span
-                        className="ml-1 text-red-300"
+                        className="ml-1 text-destructive"
                         title={entry.failed}
                         aria-label={`Parse failed: ${entry.failed}`}
                       >
@@ -144,7 +170,7 @@ export function StructuredTable({
                       </span>
                     )}
                   </span>
-                  {columns.map((key) => (
+                  {columns.map(({ field: key }) => (
                     <span
                       role="gridcell"
                       key={key}
@@ -157,7 +183,7 @@ export function StructuredTable({
                     >
                       {key === "level" && entry.record.level ? (
                         <span
-                          className={`rounded px-1.5 py-0.5 ${/ERROR|FATAL|CRIT|EMERG|ALERT/.test(String(entry.record.level)) ? "bg-red-400/10 text-red-300" : entry.record.level === "WARN" ? "bg-amber-400/10 text-amber-300" : "bg-primary/10 text-primary"}`}
+                          className={`rounded px-1.5 py-0.5 ${/ERROR|FATAL|CRIT|EMERG|ALERT/.test(String(entry.record.level)) ? "bg-destructive/10 text-destructive" : entry.record.level === "WARN" ? "bg-amber-400/10 text-amber-800 dark:text-amber-300" : "bg-primary/10 text-primary"}`}
                         >
                           {String(entry.record.level)}
                         </span>
@@ -184,6 +210,7 @@ export function StructuredTable({
           </p>
         )}
       </div>
+      <SegmentedRowControls rows={rows} onNavigate={navigate} />
       <div className="border-t px-4 py-2 text-[11px] text-muted-foreground">
         {summary.total.toLocaleString()} records ·{" "}
         {summary.failed.toLocaleString()} failed ·{" "}

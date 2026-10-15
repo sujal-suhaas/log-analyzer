@@ -10,9 +10,8 @@ import {
   Activity,
   ArrowUpFromLine,
   BarChart3,
-  Check,
   ChevronRight,
-  Copy,
+  Download,
   FileText,
   FolderOpen,
   HardDrive,
@@ -38,8 +37,12 @@ import { FileImport } from "@/components/file-import";
 import { LogTable } from "@/components/log-table";
 import { StructuredTable } from "@/components/structured-table";
 import { LogFilters } from "@/components/log-filters";
-import { HighlightText } from "@/components/highlight";
-import { applyChartFilterPatch, EMPTY_FILTERS, type ChartFilterPatch, type FilterPreset, type FilterSummary, type Filters } from "@/lib/filters";
+import { LogDetailContent } from "@/components/log-detail-content";
+import { ViewBoundary } from "@/components/view-boundary";
+import { ExportControls } from "@/components/export-controls";
+import { downloadBlob } from "@/lib/download";
+import { useColorTheme, type ThemePreference } from "@/lib/theme";
+import { applyChartFilterPatch, EMPTY_FILTERS, filterWhere, type ChartFilterPatch, type FilterPreset, type FilterSummary, type Filters } from "@/lib/filters";
 import {
   createDatasetId,
   datasetRecord,
@@ -56,8 +59,7 @@ import {
 } from "@/lib/persistence";
 import { QUERIES } from "@/lib/queries";
 import { PARSERS, type ParserId } from "@/lib/parsers";
-import { displayValue } from "@/lib/parsers/types";
-import { ACCEPT, formatBytes, type ImportProgress } from "@/lib/read-log-file";
+import { ACCEPT, formatBytes, validateLogFile, type ImportProgress } from "@/lib/read-log-file";
 import { LogWorkerClient } from "@/lib/worker/log-client";
 import type { LogDetail, LogEvent, LogSummary } from "@/lib/worker/messages";
 
@@ -87,6 +89,8 @@ function App() {
     () => false,
   );
   const [client] = useState(() => new LogWorkerClient());
+  const [theme, setTheme] = useState<ThemePreference>("dark");
+  const dark = useColorTheme(theme);
   const [log, setLog] = useState<LogSummary | null>(null);
   const [files, setFiles] = useState<ImportedFile[]>([]);
   const [activeId, setActiveId] = useState<string | null>(null);
@@ -115,35 +119,47 @@ function App() {
   });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const [copied, setCopied] = useState(false);
+  const [detailAttempt, setDetailAttempt] = useState(0);
   const [navOpen, setNavOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [loadedDetail, setLoadedDetail] = useState<{
     revision: number;
     index: number;
     view: string;
-    value: LogDetail;
+    filterId?: number;
+    attempt: number;
+    value: LogDetail | null;
+    error: string;
   } | null>(null);
-  const detail =
+  const matchingDetail =
     loadedDetail?.revision === log?.revision &&
     loadedDetail?.index === selected &&
-    loadedDetail?.view === view
-      ? loadedDetail.value
+    loadedDetail?.view === view &&
+    loadedDetail?.filterId === filterResult?.id &&
+    loadedDetail?.attempt === detailAttempt
+      ? loadedDetail
       : null;
+  const detail = matchingDetail?.value ?? null;
   const appliedFilters = filterResult?.filters ?? EMPTY_FILTERS;
+  let exportFiltersReady = false;
+  try {
+    exportFiltersReady =
+      (!filterWhere(draftFilters).active && !filterWhere(appliedFilters).active) ||
+      JSON.stringify(draftFilters) === JSON.stringify(appliedFilters);
+  } catch {
+    // Invalid drafts must be corrected before exporting, not silently ignored.
+  }
   const operation = useRef(0);
   // File instance currently parsed in the Worker; re-importing a file hands over a
   // new instance, so identity (not entry id) decides whether a reload is needed.
   const loadedFile = useRef<File | null>(null);
   const picker = useRef<HTMLInputElement>(null);
-  const copyTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     client.onError = (cause) => setError(cause.message);
     return () => {
       operation.current++;
       client.onError = () => {};
       client.dispose();
-      if (copyTimer.current) clearTimeout(copyTimer.current);
     };
   }, [client]);
   useEffect(() => {
@@ -184,6 +200,8 @@ function App() {
           })),
         );
         if (workspace.settings) {
+          if (["dark", "light", "system"].includes(workspace.settings.theme ?? ""))
+            setTheme(workspace.settings.theme!);
           setSql(typeof workspace.settings.sql === "string" ? workspace.settings.sql : QUERIES.count.sql);
           if (["raw", "structured", "query", "analytics"].includes(workspace.settings.view))
             setView(workspace.settings.view);
@@ -227,6 +245,7 @@ function App() {
         activeDatasetId: activeId,
         view,
         sql,
+        theme,
       }).catch((cause) => {
         setPersistenceError(
           cause instanceof Error ? cause.message : "Could not save settings.",
@@ -234,7 +253,7 @@ function App() {
       });
     }, 250);
     return () => clearTimeout(timer);
-  }, [activeId, hydrated, sql, view]);
+  }, [activeId, hydrated, sql, view, theme]);
   useEffect(() => {
     if (!hydrated || !activeId) return;
     const timer = setTimeout(() => {
@@ -256,22 +275,50 @@ function App() {
             setLoadedDetail({
               revision: log.revision,
               index: selected,
-              view,
-              value,
+               view,
+               filterId: filterResult?.id,
+               attempt: detailAttempt,
+               value,
+               error: "",
             });
         })
         .catch((cause) => {
           if (!ignore)
-            setError(
-              cause instanceof Error
-                ? cause.message
-                : "Could not load details.",
-            );
+            setLoadedDetail({
+              revision: log.revision,
+              index: selected,
+              view,
+              filterId: filterResult?.id,
+              attempt: detailAttempt,
+              value: null,
+              error: cause instanceof Error ? cause.message : "Could not load details.",
+            });
         });
     return () => {
       ignore = true;
     };
-  }, [client, log, selected, view, filterResult]);
+  }, [client, log, selected, view, filterResult, detailAttempt]);
+
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.defaultPrevented || event.isComposing) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      const editing = target?.closest('input, textarea, select, [contenteditable="true"]');
+      if (editing || target?.closest('[role="dialog"]')) return;
+      if (event.key === "/" && !event.ctrlKey && !event.metaKey && !event.altKey && log && !pending && !navOpen) {
+        event.preventDefault();
+        document.querySelector<HTMLInputElement>('[aria-label="Search logs"]')?.focus();
+      }
+      if (event.key === "Escape" && selected !== null) {
+        event.preventDefault();
+        setSelected(null);
+        setDetailsOpen(false);
+        document.querySelector<HTMLElement>(view === "raw" ? '[aria-label="Raw log lines"]' : '[aria-label="Structured logs"]')?.focus();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [log, pending, navOpen, selected, view]);
 
   function reportProgress(event: LogEvent) {
     if (event.type === "READ_PROGRESS")
@@ -284,6 +331,12 @@ function App() {
 
   async function importFiles(incoming: File[]) {
     if (!incoming.length) return;
+    try {
+      for (const file of incoming) validateLogFile(file);
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Unsupported file.");
+      return;
+    }
     const next = [...files];
     let target: ImportedFile | null = null;
     let previousTarget: ImportedFile | undefined;
@@ -534,7 +587,6 @@ function App() {
   function selectLine(index: number) {
     setSelected(index);
     setDetailsOpen(true);
-    setCopied(false);
   }
 
   function applyChartPatch(patch: ChartFilterPatch) {
@@ -567,17 +619,6 @@ function App() {
     });
   }
   const raw = detail?.raw ?? "";
-  const entry = detail?.entry ?? null;
-  async function copyLine() {
-    try {
-      await navigator.clipboard.writeText(raw);
-      setCopied(true);
-      if (copyTimer.current) clearTimeout(copyTimer.current);
-      copyTimer.current = setTimeout(() => setCopied(false), 2000);
-    } catch {
-      setError("Clipboard unavailable. Select and copy the raw text manually.");
-    }
-  }
   const navigation = (
     <>
       <div className="flex h-[76px] items-center gap-3 px-6">
@@ -711,11 +752,7 @@ function App() {
         <div className="min-h-0 flex-1 overflow-auto p-4">
           <Badge variant="outline" className="font-mono text-primary">
             LINE{" "}
-            {view === "structured"
-              ? entry
-                ? entry.row + 1
-                : "…"
-              : selected + 1}
+            {detail?.sourceLine ?? "…"}
           </Badge>
           <dl className="my-5 space-y-3 text-xs">
             <div className="flex justify-between gap-4">
@@ -733,51 +770,12 @@ function App() {
               <dd>{view === "raw" ? "Raw text" : "Structured"}</dd>
             </div>
           </dl>
-          {entry?.failed && (
-            <p className="mb-4 rounded border border-red-400/25 p-2 text-xs text-red-300">
-              Parse failed: {entry.failed}
-            </p>
-          )}
-          {entry && (
-            <dl aria-label="Parsed fields" className="mb-5 space-y-3 text-xs">
-              {Object.entries(entry.record).map(([key, value]) => (
-                <div key={key}>
-                  <dt className="text-muted-foreground">{key}</dt>
-                  <dd className="mt-1 whitespace-pre-wrap break-all font-mono">
-                    {displayValue(value) || "—"}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          )}
-          <div className="mb-2 flex items-center justify-between">
-            <span className="text-[10px] tracking-wider text-muted-foreground">
-              RAW CONTENT
-            </span>
-            <Button
-              variant="ghost"
-              size="sm"
-              disabled={!detail}
-              onClick={copyLine}
-            >
-              {copied ? <Check size={12} /> : <Copy size={12} />}
-              {copied ? "Copied" : "Copy"}
-            </Button>
-          </div>
-          <pre
-            aria-label="Raw log content"
-            className="max-h-[65vh] overflow-auto whitespace-pre-wrap break-all rounded-lg border bg-background p-3 font-mono text-xs leading-6 text-zinc-300"
-          >
-            {detail ? (
-              raw ? (
-                <HighlightText text={raw} ranges={detail.highlights} />
-              ) : (
-                "(empty line)"
-              )
-            ) : (
-              "Loading…"
-            )}
-          </pre>
+          <LogDetailContent
+            key={`${log.revision}-${view}-${selected}-${filterResult?.id}-${detailAttempt}`}
+            detail={detail}
+            error={matchingDetail?.error ?? ""}
+            onRetry={() => setDetailAttempt((value) => value + 1)}
+          />
         </div>
       )}
       <div className="border-t px-4 py-3 text-[10px] text-muted-foreground">
@@ -792,7 +790,7 @@ function App() {
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => e.preventDefault()}
     >
-      <aside className="hidden w-[232px] shrink-0 flex-col border-r bg-[#101212] md:flex">
+      <aside className="hidden w-[232px] shrink-0 flex-col border-r bg-background md:flex">
         {navigation}
       </aside>
       <Sheet open={navOpen} onOpenChange={setNavOpen}>
@@ -825,12 +823,34 @@ function App() {
             />
             <span>Log explorer</span>
           </div>
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2 sm:gap-4">
+            <label className="flex items-center gap-2 text-xs">
+              <span className="hidden sm:inline">Theme</span>
+              <select
+                aria-label="Color theme"
+                className="rounded border bg-background px-2 py-1"
+                value={theme}
+                disabled={!hydrated}
+                onChange={(event) => setTheme(event.target.value as ThemePreference)}
+              >
+                <option value="dark">Dark</option>
+                <option value="light">Light</option>
+                <option value="system">System</option>
+              </select>
+            </label>
+            <details className="relative text-xs">
+              <summary className="cursor-pointer">Shortcuts</summary>
+              <p className="absolute right-0 z-50 mt-2 w-64 rounded border bg-popover p-3 text-popover-foreground shadow">
+                / focuses search. ↑/↓, Home/End navigate rows. Enter inspects.
+                Escape closes details. Ctrl/Cmd + Enter runs SQL in the editor.
+                Resize columns with arrow keys on their handles.
+              </p>
+            </details>
             <span className="hidden items-center gap-1.5 text-[10px] text-muted-foreground sm:flex">
               <ShieldCheck size={13} />
               On-device processing
             </span>
-            <span className="flex size-7 items-center justify-center rounded-full border bg-white/5 text-[10px]">
+            <span className="hidden size-7 items-center justify-center rounded-full border bg-muted text-[10px] sm:flex">
               LW
             </span>
           </div>
@@ -846,7 +866,7 @@ function App() {
                   variant="outline"
                   className="text-[9px] text-muted-foreground"
                 >
-                   PHASE 08
+                   PHASE 10
                 </Badge>
               </div>
               <p className="mt-2 text-xs text-muted-foreground">
@@ -927,7 +947,7 @@ function App() {
         {error && (
           <div
             role="alert"
-            className="mx-4 mb-3 flex items-center justify-between rounded-md border border-red-400/25 bg-red-400/10 px-4 py-2 text-xs text-red-300 sm:mx-7"
+            className="mx-4 mb-3 flex items-center justify-between rounded-md border border-destructive/30 bg-destructive/10 px-4 py-2 text-xs text-destructive sm:mx-7"
           >
             {error}
             <Button
@@ -943,7 +963,7 @@ function App() {
         {persistenceError && (
           <p
             role="status"
-            className="mx-4 mb-3 rounded border border-amber-400/25 bg-amber-400/10 px-4 py-2 text-xs text-amber-200 sm:mx-7"
+            className="mx-4 mb-3 rounded border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-xs text-amber-800 dark:text-amber-200 sm:mx-7"
           >
             Local persistence unavailable: {persistenceError}
           </p>
@@ -1027,7 +1047,7 @@ function App() {
           )}
           {log && (
             <span
-              className={log.failed ? "text-red-300" : "text-muted-foreground"}
+              className={log.failed ? "text-destructive" : "text-muted-foreground"}
             >
               {log.failed.toLocaleString()} failed
             </span>
@@ -1074,6 +1094,12 @@ function App() {
             </p>
           </div>
         )}
+        {((pending?.size ?? 0) >= 10 * 1024 * 1024 || (log?.size ?? 0) >= 10 * 1024 * 1024 || (log?.total ?? 0) >= 100_000) && (
+          <p role="note" aria-label="Memory warning" className="mx-4 mb-3 rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-800 dark:text-amber-200 sm:mx-7">
+            Large dataset: parsed records, DuckDB queries, and download Blobs can use much more memory than the input file.
+            Prefer aggregates or SQL limits; export only what you need. Only the active file is parsed. Limits: 50 MiB and 1,250,000 source lines.
+          </p>
+        )}
         {log && (
           <LogFilters
             key={`filters-${log.revision}`}
@@ -1088,6 +1114,9 @@ function App() {
             onLoadPreset={setDraftFilters}
             onDeletePreset={removeFilterPreset}
             onChange={(result) => {
+              // The initial debounced no-filter notification is not a scope
+              // change and must not erase a row selected just after import.
+              if (result === filterResult) return;
               setFilterResult(result);
               setSelected(null);
               setDetailsOpen(false);
@@ -1127,6 +1156,35 @@ function App() {
               </Button>
             )}
           </div>
+          {log && (
+            <div className="flex shrink-0 flex-wrap items-center gap-3 border-b px-4 py-2">
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={!!pending || !hydrated}
+                onClick={() => {
+                  const file = loadedFile.current;
+                  if (file) downloadBlob(file, file.name);
+                }}
+              >
+                <Download size={13} />
+                Download original
+              </Button>
+              {view !== "query" && (
+                <>
+                  <ExportControls
+                    key={`logs-export-${log.revision}-${JSON.stringify(appliedFilters)}-${JSON.stringify(draftFilters)}`}
+                    kind="logs"
+                    disabled={!!pending || !hydrated || !exportFiltersReady}
+                    onExport={(format) => client.exportLogs(log.revision, appliedFilters, format)}
+                  />
+                  <span className="text-[10px] text-muted-foreground">
+                    Exports all matching structured records, not just visible rows.
+                  </span>
+                </>
+              )}
+            </div>
+          )}
           {!log ? (
             <div className="min-h-0 flex-1 overflow-auto px-5 py-8">
               <div className="mb-7 text-center">
@@ -1143,6 +1201,7 @@ function App() {
               />
             </div>
           ) : view === "query" ? (
+            <ViewBoundary key={`query-boundary-${log.revision}`}>
             <Suspense
               fallback={
                 <p className="p-4 text-xs text-muted-foreground">
@@ -1162,9 +1221,12 @@ function App() {
                  onSaved={setSaved}
                  disabled={!!pending || !hydrated}
                  autoRun={restoreQueryOutput}
+                 dark={dark}
               />
             </Suspense>
-           ) : view === "analytics" ? (
+            </ViewBoundary>
+            ) : view === "analytics" ? (
+              <ViewBoundary key={`analytics-boundary-${log.revision}`}>
              <Suspense
                fallback={
                  <p className="p-4 text-xs text-muted-foreground">
@@ -1179,7 +1241,8 @@ function App() {
                  filters={appliedFilters}
                  onApplyFilter={applyChartPatch}
                />
-             </Suspense>
+              </Suspense>
+              </ViewBoundary>
            ) : (
             <div className="flex min-h-0 flex-1">
               <div className="flex min-w-0 flex-1 flex-col">

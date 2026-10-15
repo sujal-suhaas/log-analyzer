@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef } from "react";
 import { basicSetup } from "codemirror";
-import { EditorState } from "@codemirror/state";
+import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
 import { PostgreSQL, sql } from "@codemirror/lang-sql";
 import { oneDark } from "@codemirror/theme-one-dark";
@@ -11,18 +11,21 @@ export default function SqlEditor({
   columns,
   onChange,
   onRun,
+  dark,
 }: {
   value: string;
   columns: readonly string[];
   onChange: (value: string) => void;
   onRun: () => void;
+  dark: boolean;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const view = useRef<EditorView | null>(null);
   const change = useRef(onChange);
   const run = useRef(onRun);
+  const theme = useRef(new Compartment());
   // The editor owns the document; props describe only its initial value and schema.
-  const initial = useRef({ value, columns });
+  const initial = useRef({ value, columns, dark });
   useLayoutEffect(() => {
     change.current = onChange;
   }, [onChange]);
@@ -37,10 +40,10 @@ export default function SqlEditor({
         doc: initial.current.value,
         extensions: [
           basicSetup,
-          oneDark,
+          theme.current.of(initial.current.dark ? oneDark : []),
           sql({
             dialect: PostgreSQL,
-            schema: { logs: initial.current.columns },
+            schema: { logs: [...initial.current.columns] },
           }),
           EditorView.lineWrapping,
           EditorView.contentAttributes.of({ "aria-label": "SQL query" }),
@@ -61,6 +64,9 @@ export default function SqlEditor({
       view.current = null;
     };
   }, []);
+  useEffect(() => {
+    view.current?.dispatch({ effects: theme.current.reconfigure(dark ? oneDark : []) });
+  }, [dark]);
   useEffect(() => {
     const instance = view.current;
     if (!instance) return;

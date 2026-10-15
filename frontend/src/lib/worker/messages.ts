@@ -1,6 +1,8 @@
 import type { ParsedRecord, ParserId } from "../parsers/types";
 import type { QueryResult } from "../queries";
 import type { Filters, FilterSummary, Highlight } from "../filters";
+import type { ExportFormat, ExportResult } from "../export";
+export type { ExportFormat, ExportResult } from "../export";
 
 // Worker owns text, offsets and records. UI receives summaries and bounded windows.
 export type LogSummary = {
@@ -18,6 +20,7 @@ export type LogSummary = {
 export type RecordEntry = ParsedRecord & { highlights?: Highlight[] };
 export type RawEntry = { row: number; raw: string; highlights?: Highlight[] };
 export type LogDetail = {
+  sourceLine: number;
   raw: string;
   entry: RecordEntry | null;
   highlights?: Highlight[];
@@ -81,8 +84,23 @@ export type LogRequest =
       filterId?: number;
     }
   | { id: number; type: "RUN_QUERY"; revision: number; sql: string }
+  | {
+      id: number;
+      type: "EXPORT_LOGS";
+      revision: number;
+      filters: Filters;
+      format: ExportFormat;
+    }
+  | {
+      id: number;
+      type: "EXPORT_QUERY";
+      revision: number;
+      format: ExportFormat;
+    }
   | { id: number; type: "GET_ANALYTICS"; revision: number; filters: Filters }
   | { id: number; type: "FILTER"; revision: number; filters: Filters }
+  // Request-scoped: only RUN_QUERY with this id; never import/export or the Worker.
+  | { id: number; type: "CANCEL_QUERY"; target: number }
   | { id: number; type: "CANCEL"; target: number };
 export type RequestPayload = LogRequest extends infer R
   ? R extends LogRequest
@@ -101,6 +119,7 @@ export type LogResponse =
         | LogDetail
         | QueryResult
         | AnalyticsSnapshot
+        | ExportResult
         | null;
     }
   | { id: number; ok: false; error: string; name: string };

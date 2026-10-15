@@ -15,6 +15,9 @@ import type {
 let current: { log: LogFile; dataset: ParsedDataset; revision: number } | null =
   null;
 let revision = 0;
+let queryGeneration = 0;
+let lastQuery: { revision: number; sql: string } | null = null;
+const queries = new Map<number, AbortController>();
 let filterGeneration = 0;
 let filtered: {
   summary: FilterSummary;
@@ -27,6 +30,13 @@ const respond = (response: LogResponse | LogEvent) =>
 
 self.onmessage = async ({ data: request }: MessageEvent<LogRequest>) => {
   try {
+    if (request.type === "CANCEL_QUERY") {
+      queries.get(request.target)?.abort(
+        new DOMException("Query cancelled.", "AbortError"),
+      );
+      respond({ id: request.id, ok: true, result: null });
+      return;
+    }
     if (request.type === "CANCEL") {
       if (active?.id === request.target) active.controller.abort();
       respond({ id: request.id, ok: true, result: null });
@@ -60,6 +70,8 @@ self.onmessage = async ({ data: request }: MessageEvent<LogRequest>) => {
         signal.throwIfAborted();
         // Commit once, only after reading AND parsing succeed. Cancel keeps old data.
         current = { log, dataset, revision: ++revision };
+        lastQuery = null;
+        queryGeneration++;
         filtered = null;
         filterGeneration++;
         const result: LogSummary = {
@@ -124,10 +136,63 @@ self.onmessage = async ({ data: request }: MessageEvent<LogRequest>) => {
       return;
     }
     if (request.type === "RUN_QUERY") {
-      const { runSql } = await import("./database");
-      const result = await runSql(request.revision, log, dataset, request.sql);
-      if (current?.revision !== request.revision)
-        throw new Error("Dataset changed. Run query again.");
+      const generation = ++queryGeneration;
+      // A failed/pending run must not export an earlier successful result.
+      lastQuery = null;
+      const controller = new AbortController();
+      queries.set(request.id, controller);
+      const { signal } = controller;
+      try {
+        const { runSql } = await import("./database");
+        signal.throwIfAborted();
+        const result = await runSql(
+          request.revision, log, dataset, request.sql, signal,
+        );
+        signal.throwIfAborted();
+        if (current?.revision !== request.revision)
+          throw new Error("Dataset changed. Run query again.");
+        if (generation !== queryGeneration) throw new Error("Query superseded.");
+        lastQuery = { revision: request.revision, sql: request.sql };
+        respond({ id: request.id, ok: true, result });
+      } finally {
+        queries.delete(request.id);
+      }
+      return;
+    }
+    if (request.type === "EXPORT_LOGS" || request.type === "EXPORT_QUERY") {
+      const query = lastQuery;
+      const assertCurrent = () => {
+        if (current?.revision !== request.revision)
+          throw new Error("Dataset changed. Retry export with current dataset.");
+        if (
+          request.type === "EXPORT_QUERY" &&
+          (query !== lastQuery || !query || query.revision !== request.revision)
+        )
+          throw new Error(
+            "Query changed or unavailable. Run query successfully before exporting.",
+          );
+      };
+      assertCurrent();
+      const { exportFilteredLogs, exportSql } = await import("./database");
+      assertCurrent();
+      const result = request.type === "EXPORT_LOGS"
+        ? await exportFilteredLogs(
+            request.revision,
+            log,
+            dataset,
+            request.filters,
+            request.format,
+            assertCurrent,
+          )
+        : await exportSql(
+            request.revision,
+            log,
+            dataset,
+            query!.sql,
+            request.format,
+            assertCurrent,
+          );
+      assertCurrent();
       respond({ id: request.id, ok: true, result });
       return;
     }
@@ -184,7 +249,7 @@ self.onmessage = async ({ data: request }: MessageEvent<LogRequest>) => {
       respond({
         id: request.id,
         ok: true,
-        result: { raw, entry, highlights: ranges },
+        result: { raw, entry, sourceLine: (entry?.row ?? index) + 1, highlights: ranges },
       });
       return;
     }

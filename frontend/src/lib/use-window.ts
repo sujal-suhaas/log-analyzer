@@ -8,34 +8,38 @@ export function useWindow<T>(
   to: number,
 ) {
   const start = Math.max(0, Math.floor(from / 64) * 64 - 64);
-  const count = Math.min(256, length - start, Math.max(192, to - start + 1));
-  const [window, setWindow] = useState<{ start: number; rows: T[] }>({
-    start: 0,
-    rows: [],
-  });
-  const [error, setError] = useState("");
+  const count = Math.max(0, Math.min(256, length - start, Math.max(192, to - start + 1)));
+  const [attempt, setAttempt] = useState(0);
+  const [window, setWindow] = useState<{
+    fetcher: typeof fetcher;
+    start: number;
+    count: number;
+    attempt: number;
+    rows: T[];
+    error: string;
+  } | null>(null);
+  const matches = window?.fetcher === fetcher && window?.start === start && window?.count === count && window?.attempt === attempt;
   useEffect(() => {
     let ignore = false;
     if (count > 0)
       void fetcher(start, count)
         .then((rows) => {
           if (!ignore) {
-            setWindow({ start, rows });
-            setError("");
+            setWindow({ fetcher, start, count, attempt, rows, error: "" });
           }
         })
         .catch((cause) => {
           if (!ignore)
-            setError(
-              cause instanceof Error ? cause.message : "Could not load rows.",
-            );
+            setWindow({ fetcher, start, count, attempt, rows: [], error: cause instanceof Error ? cause.message : "Could not load rows." });
         });
     return () => {
       ignore = true;
     };
-  }, [fetcher, start, count]);
+  }, [fetcher, start, count, attempt]);
   return {
-    lookup: (index: number) => window.rows[index - window.start],
-    error,
+    lookup: (index: number) => window?.fetcher === fetcher ? window.rows[index - window.start] : undefined,
+    error: matches ? window.error : "",
+    loading: count > 0 && !matches,
+    retry: () => setAttempt((value) => value + 1),
   };
 }

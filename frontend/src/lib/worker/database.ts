@@ -4,8 +4,13 @@ import workerUrl from "@duckdb/duckdb-wasm/dist/duckdb-browser-eh.worker.js?url"
 import { CORE_FIELDS, type ParsedDataset } from "../parsers/types";
 import { recordRaw } from "../parsers";
 import type { LogFile } from "../read-log-file";
-import { SQL_LIMIT, type QueryResult } from "../queries";
+import { LOG_COLUMNS, SQL_LIMIT, type QueryResult } from "../queries";
 import { filterWhere, type Filters, type Highlight } from "../filters";
+import {
+  serializeExport,
+  validateExportFormat,
+  type ExportFormat,
+} from "../export";
 import type {
   AnalyticsCountPoint,
   AnalyticsGranularity,
@@ -42,15 +47,33 @@ async function open() {
   }
 }
 
+async function abortable<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+  let abort = () => {};
+  const cancelled = new Promise<never>((_, reject) => {
+    abort = () => reject(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+  });
+  try {
+    return await Promise.race([task, cancelled]);
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+}
+
 // Load on first preset run. Keep SQL work serialized and old table until commit.
 function withDatabase<T>(
   revision: number,
   log: LogFile,
   dataset: ParsedDataset,
   action: (connection: duckdb.AsyncDuckDBConnection) => Promise<T>,
+  assertCurrent: () => void = () => {},
+  signal?: AbortSignal,
 ): Promise<T> {
   const task = queue.then(async () => {
+    assertCurrent();
     const { db, connection } = await (engine ??= open());
+    assertCurrent();
     if (loadedRevision !== revision) {
       await connection.query(
         "BEGIN TRANSACTION; CREATE OR REPLACE TABLE logs (source_line INTEGER, timestamp TIMESTAMPTZ, level VARCHAR, service VARCHAR, host VARCHAR, status INTEGER, duration_ms DOUBLE, message VARCHAR, raw VARCHAR, extras JSON, parse_error VARCHAR);",
@@ -58,6 +81,7 @@ function withDatabase<T>(
       try {
         const core = new Set<string>(CORE_FIELDS);
         for (let start = 0; start < dataset.records.length; start += 1000) {
+          assertCurrent();
           const rows = dataset.records
             .slice(start, start + 1000)
             .map((entry) => {
@@ -82,6 +106,7 @@ function withDatabase<T>(
             });
           await db.registerFileText("batch.json", JSON.stringify(rows));
           try {
+            assertCurrent();
             await connection.query(
               "INSERT INTO logs SELECT source_line, TRY_CAST(timestamp AS TIMESTAMPTZ), level, service, host, status, duration_ms, message, raw, CAST(extras AS JSON), parse_error FROM read_json('batch.json', format='array', columns={source_line:'INTEGER', timestamp:'VARCHAR', level:'VARCHAR', service:'VARCHAR', host:'VARCHAR', status:'INTEGER', duration_ms:'DOUBLE', message:'VARCHAR', raw:'VARCHAR', extras:'VARCHAR', parse_error:'VARCHAR'});",
             );
@@ -89,6 +114,7 @@ function withDatabase<T>(
             await db.dropFile("batch.json");
           }
         }
+        assertCurrent();
         await connection.query("COMMIT");
         loadedRevision = revision;
       } catch (error) {
@@ -96,36 +122,17 @@ function withDatabase<T>(
         throw error;
       }
     }
+    assertCurrent();
     return action(connection);
   });
+  // The caller can stop waiting during initialization/loading or while queued,
+  // but the underlying task must finish rollback/stream cleanup before reuse.
   queue = task.catch(() => {});
-  return task;
+  return signal ? abortable(task, signal) : task;
 }
 
 // 100 KB is far past any hand-written query and keeps a paste bomb out of the engine.
 const SQL_MAX = 100_000;
-
-function shapeResult(
-  result: {
-    schema: { fields: { name: string }[] };
-    numRows: number;
-    toArray: () => Record<string, unknown>[];
-  },
-  started: number,
-): QueryResult {
-  const rows = result.toArray();
-  const shown = rows.slice(0, SQL_LIMIT);
-  return {
-    columns: result.schema.fields.map((field) => field.name),
-    rows: shown.map((row) =>
-      result.schema.fields.map((field) =>
-        row[field.name] == null ? "NULL" : String(row[field.name]),
-      ),
-    ),
-    elapsedMs: performance.now() - started,
-    truncated: Math.max(0, result.numRows - shown.length),
-  };
-}
 
 const MUTATING_KEYWORDS = new Set([
   "ALTER",
@@ -256,28 +263,190 @@ function validateReadOnlySql(sql: string) {
     throw new Error("Run one read-only SQL statement at a time.");
 }
 
+// Shared by preview and export. Keep validation and user SQL exactly the same.
+function validateSql(sql: string) {
+  if (typeof sql !== "string" || !sql.trim())
+    throw new Error("Enter a query first.");
+  if (sql.length > SQL_MAX)
+    throw new Error("Query is too long (100 KB maximum).");
+  if (sql.includes("\0"))
+    throw new Error("Query contains a null character.");
+  validateReadOnlySql(sql);
+}
+
 export function runSql(
   revision: number,
   log: LogFile,
   dataset: ParsedDataset,
   sql: string,
+  signal?: AbortSignal,
 ): Promise<QueryResult> {
-  if (typeof sql !== "string" || !sql.trim())
-    return Promise.reject(new Error("Enter a query first."));
-  if (sql.length > SQL_MAX)
-    return Promise.reject(new Error("Query is too long (100 KB maximum)."));
-  if (sql.includes("\0"))
-    return Promise.reject(new Error("Query contains a null character."));
   try {
-    validateReadOnlySql(sql);
+    validateSql(sql);
   } catch (error) {
     return Promise.reject(error);
   }
-  return withDatabase(revision, log, dataset, async (connection) => {
-    const started = performance.now();
-    const result = await connection.query(sql);
-    return shapeResult(result, started);
-  });
+  const assertCurrent = () => signal?.throwIfAborted();
+  return withDatabase(
+    revision,
+    log,
+    dataset,
+    async (connection) => {
+      const started = performance.now();
+      let stream: Awaited<ReturnType<typeof connection.send>> | undefined;
+      let cancellation: Promise<unknown> | undefined;
+      const interrupt = () => {
+        cancellation ??= connection.cancelSent().catch(() => {});
+      };
+      assertCurrent();
+      // query() executes synchronously inside the engine Worker. send(false)
+      // executes the identical SQL as a pending, materialized query, yielding
+      // between engine tasks so cancelSent() can actually interrupt execution.
+      signal?.addEventListener("abort", interrupt, { once: true });
+      try {
+        stream = await connection.send(sql, false);
+        assertCurrent();
+        await stream.open();
+        const fields = stream.schema.fields;
+        const rows: string[][] = [];
+        let total = 0;
+        for await (const batch of stream) {
+          assertCurrent();
+          // Convert and retain only the bounded preview. Count later batches
+          // without retaining all Arrow data or allocating a full toArray().
+          const shown = Math.min(batch.numRows, SQL_LIMIT - rows.length);
+          const columns = fields.map((_, index) => batch.getChildAt(index)!);
+          for (let index = 0; index < shown; index++) {
+            rows.push(columns.map((column) => {
+              const value = column.get(index);
+              return value == null ? "NULL" : String(value);
+            }));
+          }
+          total += batch.numRows;
+        }
+        assertCurrent();
+        return {
+          columns: fields.map((field) => field.name),
+          rows,
+          elapsedMs: performance.now() - started,
+          truncated: Math.max(0, total - rows.length),
+        };
+      } catch (error) {
+        // DuckDB reports its own cancellation error; expose a stable AbortError.
+        assertCurrent();
+        throw error;
+      } finally {
+        signal?.removeEventListener("abort", interrupt);
+        // Never let a delayed cancellation hit the next queued operation.
+        await cancellation;
+        await stream?.cancel().catch(() => {});
+      }
+    },
+    assertCurrent,
+    signal,
+  );
+}
+
+async function consumeExport(
+  connection: duckdb.AsyncDuckDBConnection,
+  stream: Awaited<ReturnType<duckdb.AsyncDuckDBConnection["send"]>>,
+  revision: number,
+  log: LogFile,
+  kind: "logs" | "query",
+  format: ExportFormat,
+  assertCurrent: () => void,
+) {
+  let complete = false;
+  try {
+    // DuckDB send() returns a lazy Arrow reader; read its schema before writing
+    // headers (including when the result contains no record batches).
+    await stream.open();
+    const result = await serializeExport(
+      stream,
+      { revision, name: log.name, kind, format },
+      assertCurrent,
+    );
+    complete = true;
+    return result;
+  } finally {
+    // A stale revision/serialization error must release the stream before the
+    // next queued SQL action. No temporary tables/files or dataset mutation.
+    if (!complete) await connection.cancelSent().catch(() => {});
+    await stream.cancel().catch(() => {});
+  }
+}
+
+export async function exportSql(
+  revision: number,
+  log: LogFile,
+  dataset: ParsedDataset,
+  sql: string,
+  format: ExportFormat,
+  assertCurrent: () => void,
+) {
+  validateSql(sql);
+  validateExportFormat(format);
+  return withDatabase(
+    revision,
+    log,
+    dataset,
+    async (connection) => {
+      // Send the exact statement: no subquery wrapping, LIMIT removal or SQL_LIMIT.
+      const stream = await connection.send(sql, true);
+      return consumeExport(
+        connection, stream, revision, log, "query", format, assertCurrent,
+      );
+    },
+    assertCurrent,
+  );
+}
+
+async function validateFilterPattern(
+  connection: duckdb.AsyncDuckDBConnection,
+  filters: Filters,
+) {
+  // Validate even on empty tables: malformed RE2 patterns must surface consistently.
+  const validation = await connection.prepare(
+    `SELECT regexp_matches(?, ?, '${filters.regex ? "i" : "il"}')`,
+  );
+  try {
+    await validation.query("", filters.text);
+  } finally {
+    await validation.close();
+  }
+}
+
+export async function exportFilteredLogs(
+  revision: number,
+  log: LogFile,
+  dataset: ParsedDataset,
+  filters: Filters,
+  format: ExportFormat,
+  assertCurrent: () => void,
+) {
+  validateExportFormat(format);
+  const where = filterWhere(filters);
+  return withDatabase(
+    revision,
+    log,
+    dataset,
+    async (connection) => {
+      await validateFilterPattern(connection, filters);
+      assertCurrent();
+      const statement = await connection.prepare(
+        `SELECT ${LOG_COLUMNS.join(", ")} FROM logs WHERE ${where.sql} ORDER BY source_line`,
+      );
+      try {
+        const stream = await statement.send(...where.params);
+        return await consumeExport(
+          connection, stream, revision, log, "logs", format, assertCurrent,
+        );
+      } finally {
+        await statement.close();
+      }
+    },
+    assertCurrent,
+  );
 }
 
 const ERROR_LEVELS_SQL =
@@ -498,15 +667,7 @@ export function filterLines(
 ) {
   const where = filterWhere(filters);
   return withDatabase(revision, log, dataset, async (connection) => {
-    // Validate even on empty tables: malformed RE2 patterns must surface consistently.
-    const validation = await connection.prepare(
-      `SELECT regexp_matches(?, ?, '${filters.regex ? "i" : "il"}')`,
-    );
-    try {
-      await validation.query("", filters.text);
-    } finally {
-      await validation.close();
-    }
+    await validateFilterPattern(connection, filters);
     const statement = await connection.prepare(
       `SELECT source_line FROM logs WHERE ${where.sql} ORDER BY source_line`,
     );
