@@ -202,7 +202,9 @@ Build the main log-explorer experience.
 
 Later:
 
-- [ ]  Add a friendly query bar such as `level:ERROR service:auth status:500+` and convert it into SQL.
+- [x]  Add a friendly query bar such as `level:ERROR service:auth status:500+` and convert it into SQL.
+  Compiles through the filter panel's own `filterWhere` builder, so both paths
+  select identical rows. Typing previews the SQL, Enter runs it.
 
 This gives you a CloudWatch/Datadog-like experience without building a complete query language.
 

@@ -187,3 +187,42 @@ test("Phase 6: query results reset when the dataset or view changes", async ({
     page.getByRole("table", { name: "SQL results" }).getByRole("cell", { name: "3" }),
   ).toBeVisible({ timeout: 60_000 });
 });
+
+test("Phase 6: the query bar compiles filters into equivalent SQL", async ({
+  page,
+}) => {
+  test.setTimeout(120_000);
+  await page.goto("/");
+  await importJsonl(page, "bar.jsonl", [
+    '{"timestamp":"2026-01-01T01:00:00Z","level":"INFO","service":"auth","message":"alpha"}',
+    '{"timestamp":"2026-01-01T02:00:00Z","level":"ERROR","service":"auth","message":"beta"}',
+    '{"timestamp":"2026-01-01T03:00:00Z","level":"ERROR","service":"payment","message":"gamma"}',
+  ]);
+  await expect(page.getByText("3 records · 0 failed · 0 skipped")).toBeVisible();
+  await openQueryView(page);
+  const results = page.getByRole("table", { name: "SQL results" });
+
+  // Typing filters previews the statement the bar will run.
+  await page.getByLabel("Query bar").fill("level:ERROR service:auth");
+  await expect(page.getByLabel("SQL query")).toContainText(
+    "WHERE level = 'ERROR' AND service = 'auth'",
+  );
+
+  // Enter runs it, and only the matching row comes back.
+  await page.getByLabel("Query bar").press("Enter");
+  await expect(results.getByRole("row")).toHaveCount(2, { timeout: 60_000 });
+  await expect(results).toContainText("beta");
+  await expect(results).not.toContainText("gamma");
+
+  // A typo explains itself, keeps the previous result and runs nothing.
+  await page.getByLabel("Query bar").fill("levl:ERROR");
+  await expect(page.getByRole("alert")).toContainText(/Unknown filter "levl"/);
+  await page.getByLabel("Query bar").press("Enter");
+  await expect(results).toContainText("beta");
+
+  // Text search compiles to the same predicate the filter panel builds.
+  await page.getByLabel("Query bar").fill("level:ERROR timeout");
+  await expect(page.getByLabel("SQL query")).toContainText(
+    "regexp_matches(message, 'timeout', 'il')",
+  );
+});

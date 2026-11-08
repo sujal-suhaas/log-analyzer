@@ -21,6 +21,7 @@ import {
 import type { LogWorkerClient } from "@/lib/worker/log-client";
 import type { LogSummary } from "@/lib/worker/messages";
 import { format } from "sql-formatter";
+import { queryBarSql } from "@/lib/query-bar";
 
 const SqlEditor = lazy(() => import("./sql-editor"));
 
@@ -54,6 +55,8 @@ export default function QueryWorkspace({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [name, setName] = useState("");
+  const [bar, setBar] = useState("");
+  const [barError, setBarError] = useState("");
   const [cancelled, setCancelled] = useState(false);
   const layout = useTableColumns((result?.columns ?? []).map((column, index) => ({
     id: `${index}:${column}`, label: column, index, defaultWidth: 220,
@@ -117,6 +120,39 @@ export default function QueryWorkspace({
     void run(sql, false);
   }, [autoRun, disabled, run, sql, summary.revision]);
 
+  // The bar previews the SQL it produced in the editor, so the statement can
+  // still be edited by hand. A bad token reports itself and leaves the current
+  // statement alone rather than replacing it with something broken.
+  function filterBar(value: string) {
+    setBar(value);
+    if (!value.trim()) {
+      setBarError("");
+      return;
+    }
+    try {
+      onSql(queryBarSql(value));
+      setBarError("");
+    } catch (cause) {
+      setBarError(
+        cause instanceof Error ? cause.message : "Could not read filters.",
+      );
+    }
+  }
+
+  function runBar() {
+    if (!bar.trim()) return;
+    try {
+      const text = queryBarSql(bar);
+      setBarError("");
+      onSql(text);
+      void run(text);
+    } catch (cause) {
+      setBarError(
+        cause instanceof Error ? cause.message : "Could not read filters.",
+      );
+    }
+  }
+
   function pretty() {
     try {
       onSql(format(sql, { language: "duckdb", keywordCase: "upper" }));
@@ -176,6 +212,31 @@ export default function QueryWorkspace({
         <span className="text-[10px] text-muted-foreground">
           Ctrl/Cmd + Enter runs. DuckDB SQL over the `logs` table.
         </span>
+      </div>
+      <div className="flex flex-col gap-1">
+        <input
+          aria-label="Query bar"
+          className="rounded-lg border bg-background p-2 font-mono text-xs"
+          placeholder='level:ERROR service:auth status:500+ "database timeout"'
+          value={bar}
+          disabled={disabled}
+          onChange={(event) => filterBar(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key !== "Enter" || event.nativeEvent.isComposing) return;
+            event.preventDefault();
+            runBar();
+          }}
+        />
+        {barError ? (
+          <p role="alert" className="text-[10px] text-destructive">
+            {barError}
+          </p>
+        ) : (
+          <p className="text-[10px] text-muted-foreground">
+            Filters compile to SQL in the editor and Enter runs them. Quote text
+            that contains spaces or colons.
+          </p>
+        )}
       </div>
       <div className="h-40 shrink-0 overflow-auto rounded-lg border bg-background">
         <Suspense
