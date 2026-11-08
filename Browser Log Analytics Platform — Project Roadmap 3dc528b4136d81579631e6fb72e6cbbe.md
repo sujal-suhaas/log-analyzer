@@ -1,7 +1,9 @@
 # Browser Log Analytics Platform — Project Roadmap
 
 > Build a CloudWatch Logs / Datadog-style log analyzer that does the heavy work **inside the browser**. Upload logs, parse them, store them locally, search/filter/query them, visualize them, and export results. The backend stays intentionally thin.
-> 
+>
+
+> **Status: phases 1–10 complete**, plus the friendly query bar, the backend scope from §5 and CI. Verified by 53 frontend unit tests, 21 API tests and 48 Chromium browser tests; typecheck, lint and production build clean. See the repository `README.md` for how to run and verify it.
 
 # 1. What You're Building
 
@@ -369,52 +371,52 @@ Use these as the final feature checklist after the core phases.
 
 ### Must Have
 
-- [ ]  File upload
-- [ ]  Raw + structured log viewer
-- [ ]  Virtual scrolling
-- [ ]  Parsing
-- [ ]  Search
-- [ ]  Field filters
-- [ ]  Time filtering
-- [ ]  DuckDB SQL queries
-- [ ]  Log detail view
-- [ ]  Basic charts
-- [ ]  CSV/JSON export
-- [ ]  Local saved queries
+- [x]  File upload
+- [x]  Raw + structured log viewer
+- [x]  Virtual scrolling
+- [x]  Parsing
+- [x]  Search
+- [x]  Field filters
+- [x]  Time filtering
+- [x]  DuckDB SQL queries
+- [x]  Log detail view
+- [x]  Basic charts
+- [x]  CSV/JSON export
+- [x]  Local saved queries
 
 ### Nice to Have
 
-- [ ]  Custom regex parser
-- [ ]  Query autocomplete
-- [ ]  Click-to-filter charts
-- [ ]  Query history
-- [ ]  OPFS persistence
-- [ ]  Multiple datasets
+- [ ]  Custom regex parser — search takes RE2 regex, but parsers are still the five built-in formats.
+- [x]  Query autocomplete — CodeMirror completes the `logs` schema and DuckDB keywords.
+- [x]  Click-to-filter charts
+- [x]  Query history
+- [ ]  OPFS persistence — IndexedDB stores the original Blob and rebuilds on reload; OPFS remains the open investigation.
+- [x]  Multiple datasets — imported files stay listed and switchable, one active at a time.
 
 ### Stretch Goals
 
 - [ ]  Live tail mode
-- [ ]  Join/correlate logs from multiple services
+- [ ]  Join/correlate logs from multiple services — the `distributed` sample carries a shared `request_id`, but there is no join or tracing UI.
 - [ ]  Request-ID tracing view
-- [ ]  Remote log URL ingestion
+- [ ]  Remote log URL ingestion — samples come from the local backend, not an arbitrary URL.
 - [ ]  Shareable saved searches
-- [ ]  Simple CloudWatch/LogQL-style query syntax
-- [ ]  Synthetic log generator
+- [x]  Simple CloudWatch/LogQL-style query syntax — the Query tab's filter bar (`level:ERROR service:auth status:500+`) compiles to SQL.
+- [x]  Synthetic log generator — `backend/generate_logs.py` (CLI) and `POST /generate`.
 
 # 8. Suggested Learning Order
 
 Track your learning alongside the project:
 
-- [ ]  **1 — File API + streams**
-- [ ]  **2 — Virtualized lists**
-- [ ]  **3 — Web Workers**
-- [ ]  **4 — Basic log parsing**
-- [ ]  **5 — DuckDB-WASM**
-- [ ]  **6 — SQL filtering/aggregation**
-- [ ]  **7 — IndexedDB**
-- [ ]  **8 — Charts**
-- [ ]  **9 — Monaco query editor**
-- [ ]  **10 — Performance optimization**
+- [x]  **1 — File API + streams**
+- [x]  **2 — Virtualized lists**
+- [x]  **3 — Web Workers**
+- [x]  **4 — Basic log parsing**
+- [x]  **5 — DuckDB-WASM**
+- [x]  **6 — SQL filtering/aggregation**
+- [x]  **7 — IndexedDB**
+- [x]  **8 — Charts**
+- [x]  **9 — Monaco query editor** — built with CodeMirror instead, to keep the editor lazy and light.
+- [x]  **10 — Performance optimization**
 
 This keeps each stage understandable and gives you a working project after every major phase.
 
