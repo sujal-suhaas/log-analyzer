@@ -124,3 +124,27 @@ def test_generate_rejects_bad_requests():
 @pytest.mark.parametrize("extension", [".json", ".jsonl", ".ndjson", ".csv", ".log", ".txt"])
 def test_generate_supports_every_extension(extension):
     assert client.post("/generate", json={"extension": extension, "lines": 3, "seed": 1}).status_code == 200
+
+
+def test_cors_allows_loopback_origins_only():
+    # The app is served from Vite, so every call from it is cross origin.
+    allowed = client.get("/datasets", headers={"origin": "http://127.0.0.1:4173"})
+    assert allowed.headers["access-control-allow-origin"] == "http://127.0.0.1:4173"
+    localhost = client.get("/datasets", headers={"origin": "http://localhost:5173"})
+    assert localhost.headers["access-control-allow-origin"] == "http://localhost:5173"
+    blocked = client.get("/datasets", headers={"origin": "https://example.test"})
+    assert "access-control-allow-origin" not in blocked.headers
+
+
+def test_cors_answers_the_preflight_for_generate():
+    preflight = client.options(
+        "/generate",
+        headers={
+            "origin": "http://127.0.0.1:4173",
+            "access-control-request-method": "POST",
+            "access-control-request-headers": "content-type",
+        },
+    )
+    assert preflight.status_code == 200
+    assert preflight.headers["access-control-allow-origin"] == "http://127.0.0.1:4173"
+    assert "POST" in preflight.headers["access-control-allow-methods"]

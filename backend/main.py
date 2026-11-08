@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from typing import Iterator
 
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -11,6 +12,15 @@ import datasets
 from generate_logs import EXTENSIONS, iter_lines
 
 app = FastAPI(title="Logline", version="0.2.0")
+
+# The app is served from Vite (dev 5173, preview 4173) and calls this API cross
+# origin. Only loopback origins are allowed; the API holds no user data.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"http://(localhost|127\.0\.0\.1):\d+",
+    allow_methods=["GET", "POST"],
+    allow_headers=["content-type"],
+)
 
 # Fixed origin for generated timestamps so a download is reproducible.
 START = datetime(2026, 1, 1, tzinfo=timezone.utc)
