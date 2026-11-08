@@ -7,7 +7,11 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "test": "bun test tests",
+    "test:e2e": "playwright test",
+    "e2e:install": "playwright install chromium",
+    "check": "tsc -b && oxlint && bun test tests"
   },
   "dependencies": {
     "@base-ui/react": "^1.8.0",

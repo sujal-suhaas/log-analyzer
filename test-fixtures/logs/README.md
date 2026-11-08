@@ -3,6 +3,11 @@
 These synthetic UTF-8 JSONL files are safe local fixtures for exercising the
 browser log analyzer. They contain no real or sensitive data.
 
+They are **not committed**: `generate-test-logs.mjs` reproduces them byte for
+byte, so the repository stays small. Run it once after cloning if you want them
+for manual checks. The automated suites build their own inputs inline and do not
+read this directory.
+
 | File | Records | Intended use |
 | --- | ---: | --- |
 | `small-rich-100.jsonl` | 100 | Detail panels, filters, typed fields, nested metadata, and quick manual checks |
