@@ -26,6 +26,39 @@ async function setSql(page: Page, text: string) {
   await page.keyboard.press("Escape");
 }
 
+// Saving is an async IndexedDB transaction; reloading straight after the click
+// races the commit on a loaded machine. Wait for the record itself, not the UI.
+async function savedQueryPersisted(page: Page, name: string) {
+  await expect
+    .poll(
+      () =>
+        page.evaluate(async (name) => {
+          const db = await new Promise<IDBDatabase>((resolve, reject) => {
+            const request = indexedDB.open("logline-local");
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+          });
+          try {
+            const record = await new Promise<
+              { saved?: { name: string }[] } | undefined
+            >((resolve, reject) => {
+              const request = db
+                .transaction("query-state")
+                .objectStore("query-state")
+                .get("default");
+              request.onsuccess = () => resolve(request.result);
+              request.onerror = () => reject(request.error);
+            });
+            return record?.saved?.some((entry) => entry.name === name) ?? false;
+          } finally {
+            db.close();
+          }
+        }, name),
+      { timeout: 15_000 },
+    )
+    .toBe(true);
+}
+
 test("Phase 8: reload restores dataset, filters, query state and settings", async ({
   page,
 }) => {
@@ -53,6 +86,7 @@ test("Phase 8: reload restores dataset, filters, query state and settings", asyn
   ).toBeVisible();
   await page.getByLabel("Saved query name").fill("persisted count");
   await page.getByRole("button", { name: "Save", exact: true }).click();
+  await savedQueryPersisted(page, "persisted count");
 
   await page.reload();
   const sidebar = page.getByRole("complementary");
