@@ -61,3 +61,21 @@ jobs:
             frontend/playwright-report
             frontend/test-results
           retention-days: 7
+
+  backend:
+    name: API tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: backend
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt
+      - name: API tests
+        working-directory: backend
+        run: .venv/bin/python -m pytest tests -q

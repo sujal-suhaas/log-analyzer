@@ -44,31 +44,47 @@ def _make_line(cursor: datetime, service: str, host: str, level: str,
     return f"{ts} {level:<5} {service:<12} {host:<6} {status} {duration:>4}ms {message}"
 
 
-def generate(out: str, lines: int = 1000, size_bytes: int | None = None, seed: int | None = None) -> dict:
-    """Write log lines to `out` until `lines` or `size_bytes` (whichever applies) is reached."""
-    path = Path(out)
-    ext = path.suffix.lower()
+def iter_lines(ext: str, lines: int = 1000, size_bytes: int | None = None,
+               seed: int | None = None, start: datetime | None = None):
+    """Yield log lines until `lines` or `size_bytes` (whichever applies) is reached.
+
+    The single implementation behind both the CLI and POST /generate. Passing a
+    fixed `start` and `seed` makes the output reproducible.
+    """
     if ext not in EXTENSIONS:
         raise ValueError(f"Unsupported extension {ext!r}; use one of {sorted(EXTENSIONS)}")
     if lines < 0 or (size_bytes is not None and size_bytes < 1):
         raise ValueError("lines must be >= 0 and size_bytes >= 1")
     rng = random.Random(seed)
-    cursor = datetime.now(timezone.utc) - timedelta(hours=1)
-    header = "timestamp,level,service,host,status,duration_ms,message\n" if ext == ".csv" else None
-    count, written = 0, 0
+    cursor = start or (datetime.now(timezone.utc) - timedelta(hours=1))
+    written = 0
+    if ext == ".csv":
+        header = "timestamp,level,service,host,status,duration_ms,message\n"
+        written += len(header)
+        yield header
+    count = 0
+    while (size_bytes is None and count < lines) or (size_bytes is not None and written < size_bytes):
+        cursor += timedelta(milliseconds=rng.randint(1, 50))
+        line = _make_line(cursor, rng.choice(SERVICES), rng.choice(HOSTS),
+                          rng.choice(LEVELS), rng.choice(STATUSES), rng.randint(1, 5000),
+                          rng.choice(MESSAGES), ext)
+        written += len(line) + 1
+        count += 1
+        yield line + "\n"
+
+
+def generate(out: str, lines: int = 1000, size_bytes: int | None = None, seed: int | None = None) -> dict:
+    """Write log lines to `out` until `lines` or `size_bytes` (whichever applies) is reached."""
+    path = Path(out)
+    ext = path.suffix.lower()
+    header_lines = 1 if ext == ".csv" else 0
+    chunks = written = 0
     with open(path, "w", encoding="utf-8", newline="") as f:
-        if header:
-            f.write(header)
-            written += len(header)
-        while (size_bytes is None and count < lines) or (size_bytes is not None and written < size_bytes):
-            cursor += timedelta(milliseconds=rng.randint(1, 50))
-            line = _make_line(cursor, rng.choice(SERVICES), rng.choice(HOSTS),
-                              rng.choice(LEVELS), rng.choice(STATUSES), rng.randint(1, 5000),
-                              rng.choice(MESSAGES), ext)
-            f.write(line + "\n")
-            written += len(line) + 1
-            count += 1
-    return {"path": str(path), "lines": count, "bytes": written}
+        for chunk in iter_lines(ext, lines=lines, size_bytes=size_bytes, seed=seed):
+            f.write(chunk)
+            written += len(chunk)
+            chunks += 1
+    return {"path": str(path), "lines": chunks - header_lines, "bytes": written}
 
 
 def format_bytes(n: float) -> str:
