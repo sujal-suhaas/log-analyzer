@@ -34,6 +34,7 @@ import {
   SheetTitle,
 } from "@/components/ui/sheet";
 import { FileImport } from "@/components/file-import";
+import { SampleDatasets } from "@/components/sample-datasets";
 import { LogTable } from "@/components/log-table";
 import { StructuredTable } from "@/components/structured-table";
 import { LogFilters } from "@/components/log-filters";
@@ -329,7 +330,7 @@ function App() {
     }
   }
 
-  async function importFiles(incoming: File[]) {
+  async function importFiles(incoming: File[], parserOverride?: ParserId) {
     if (!incoming.length) return;
     try {
       for (const file of incoming) validateLogFile(file);
@@ -337,6 +338,9 @@ function App() {
       setError(cause instanceof Error ? cause.message : "Unsupported file.");
       return;
     }
+    // A sample dataset declares its own parser; the selector only applies to
+    // files the user chose.
+    const chosen = parserOverride ?? parser;
     const next = [...files];
     let target: ImportedFile | null = null;
     let previousTarget: ImportedFile | undefined;
@@ -351,7 +355,7 @@ function App() {
               file: item,
               name: item.name,
               size: item.size,
-              parser,
+              parser: chosen,
               lines: null,
             };
       if (at >= 0) next[at] = target;
@@ -1198,6 +1202,10 @@ function App() {
               <FileImport
                 onFiles={(files) => void importFiles(files)}
                  disabled={!!pending || !hydrated}
+              />
+              <SampleDatasets
+                disabled={!!pending || !hydrated}
+                onLoad={(file, parser) => void importFiles([file], parser)}
               />
             </div>
           ) : view === "query" ? (
