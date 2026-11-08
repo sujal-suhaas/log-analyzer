@@ -2,8 +2,40 @@ import { useEffect, useLayoutEffect, useRef } from "react";
 import { basicSetup } from "codemirror";
 import { Compartment, EditorState } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
-import { PostgreSQL, sql } from "@codemirror/lang-sql";
+import { PostgreSQL, SQLDialect, sql } from "@codemirror/lang-sql";
 import { oneDark } from "@codemirror/theme-one-dark";
+
+// The engine is DuckDB, which is PostgreSQL-flavoured but has its own keywords.
+// Reusing the PostgreSQL keyword set plus DuckDB's extras keeps highlighting and
+// completion honest instead of suggesting syntax the engine would reject.
+const DUCKDB_KEYWORDS = [
+  "qualify",
+  "pivot",
+  "unpivot",
+  "exclude",
+  "replace",
+  "sample",
+  "asof",
+  "semi",
+  "anti",
+  "describe",
+  "summarize",
+  "struct",
+  "list",
+  "map",
+  "union",
+  "macro",
+  "unnest",
+  "epoch_ms",
+  "strftime",
+  "regexp_matches",
+  "list_transform",
+  "list_filter",
+].join(" ");
+const DuckDB = SQLDialect.define({
+  ...PostgreSQL.spec,
+  keywords: `${PostgreSQL.spec.keywords} ${DUCKDB_KEYWORDS}`,
+});
 
 // Loaded on demand by the Query view so the main bundle stays free of the editor.
 export default function SqlEditor({
@@ -42,7 +74,7 @@ export default function SqlEditor({
           basicSetup,
           theme.current.of(initial.current.dark ? oneDark : []),
           sql({
-            dialect: PostgreSQL,
+            dialect: DuckDB,
             schema: { logs: [...initial.current.columns] },
           }),
           EditorView.lineWrapping,
